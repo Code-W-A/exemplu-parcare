@@ -1,4 +1,5 @@
 "use client"
+import { useDemoRevision } from "@/hooks/use-demo-revision"
 
 import { AlertDescription } from "@/components/ui/alert"
 
@@ -24,8 +25,8 @@ import {
   limit,
   startAfter,
   documentId,
-} from "firebase/firestore"
-import { db } from "@/lib/firebase"
+} from "@/lib/demo-data"
+import { db } from "@/lib/demo-data"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -57,7 +58,7 @@ import { TimePickerDemo } from "@/components/time-picker"
 import { checkExistingReservationByLicensePlate } from "@/lib/booking-utils"
 import { getLprPresenceState } from "@/lib/lpr-presence"
 import { normalizeLicensePlate } from "@/lib/utils"
-import { adminAuthorizedFetch } from "@/lib/admin-authorized-fetch"
+import { demoRequest } from "@/lib/demo-request"
 import { Clock, XCircle } from "lucide-react"
 import { OccupancyCounter } from "@/components/admin/occupancy-counter"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
@@ -74,6 +75,7 @@ import {
 } from "@/components/ui/alert-dialog"
 
 interface Booking {
+  lpr?: { isInside?: boolean; arrivedAt?: unknown; departedAt?: unknown; lastSeenAt?: unknown; lastEventType?: unknown }
   id: string // Firestore document ID
   licensePlate: string
   originalLicensePlate?: string
@@ -257,6 +259,7 @@ function demoDateRange(): DateRange {
 }
 
 function BookingsPageContent() {
+  const demoRevision = useDemoRevision()
   const { toast } = useToast()
   const { user, loading: authLoading, isAdmin } = useAuth()
 
@@ -392,7 +395,7 @@ function BookingsPageContent() {
   // Căutare globală (după număr / API / id / client / email),
   // independentă de intervalul "Creată la".
   // Două canale:
-  //  (1) prefix direct în Firestore (instant)
+  //  (1) prefix direct în demo (instant)
   //  (2) index local "subțire" cu toate placutele (substring oriunde)
   type PlateIndexEntry = {
     id: string
@@ -742,7 +745,7 @@ function BookingsPageContent() {
                 // Keep legacy field name for UI/back-compat, but it now means "over threshold"
                 raw.payOnSiteOverdueMoreThan3h = overdueMoreThanThreshold
 
-                // Persistăm în Firestore doar dacă este clar întârziată
+                // Persistăm în demo doar dacă este clar întârziată
                 if (overdueMoreThanThreshold) {
                   try {
                     await updateDoc(doc(db, "bookings", raw.id), {
@@ -789,37 +792,14 @@ function BookingsPageContent() {
     } else if (!authLoading && !user) {
       setIsLoading(false)
     }
-  }, [user, authLoading, fetchBookings, loadPrices, dateRange])
+  }, [user, authLoading, fetchBookings, loadPrices, dateRange, demoRevision])
 
   // ----------------------------------------------------------------
   // Căutare globală: index local subțire + cache sessionStorage (TTL 5 min)
   // ----------------------------------------------------------------
-  const PLATE_INDEX_CACHE_KEY = "bookings.plateIndex.v1"
-  const PLATE_INDEX_TTL_MS = 5 * 60 * 1000
 
   const loadPlateIndex = useCallback(
     async (opts?: { force?: boolean }) => {
-      const force = !!opts?.force
-      // 1) încearcă din sessionStorage dacă nu forțăm
-      if (!force && typeof window !== "undefined") {
-        try {
-          const raw = window.sessionStorage.getItem(PLATE_INDEX_CACHE_KEY)
-          if (raw) {
-            const parsed = JSON.parse(raw) as { savedAt: number; items: PlateIndexEntry[] }
-            if (parsed && Array.isArray(parsed.items) && parsed.savedAt) {
-              const age = Date.now() - parsed.savedAt
-              if (age < PLATE_INDEX_TTL_MS) {
-                setPlateIndex(parsed.items)
-                setPlateIndexLoadedAt(parsed.savedAt)
-                return
-              }
-            }
-          }
-        } catch (e) {
-          // ignore, refetch
-        }
-      }
-
       setPlateIndexLoading(true)
       try {
         const bookingsCollectionRef = collection(db, "bookings")
@@ -862,16 +842,6 @@ function BookingsPageContent() {
         setPlateIndex(items)
         const savedAt = Date.now()
         setPlateIndexLoadedAt(savedAt)
-        try {
-          if (typeof window !== "undefined") {
-            window.sessionStorage.setItem(
-              PLATE_INDEX_CACHE_KEY,
-              JSON.stringify({ savedAt, items }),
-            )
-          }
-        } catch (e) {
-          // quota exceeded etc. — ignorăm, indexul rămâne doar în memorie
-        }
       } catch (e) {
         console.error("Error loading plate index", e)
       } finally {
@@ -885,11 +855,11 @@ function BookingsPageContent() {
     if (!authLoading && user) {
       void loadPlateIndex()
     }
-  }, [authLoading, user, loadPlateIndex])
+  }, [authLoading, user, loadPlateIndex, demoRevision])
 
-  // Part 1 — prefix direct în Firestore pe licensePlate / apiBookingNumber
+  // Part 1 — prefix direct în demo pe licensePlate / apiBookingNumber
   // IMPORTANT: no hard limit here; fetch all prefix matches for consistency.
-  // + fallback getDoc(id) când input-ul arată ca un ID Firestore.
+  // + fallback getDoc(id) când input-ul arată ca un ID demo.
   const runFirestorePrefixSearch = useCallback(async (rawInput: string): Promise<Booking[]> => {
     const q = rawInput.trim()
     if (!q) return []
@@ -938,7 +908,7 @@ function BookingsPageContent() {
       )
     }
 
-    // Dacă input-ul poate fi un ID Firestore, încercăm fetch direct.
+    // Dacă input-ul poate fi un ID demo, încercăm fetch direct.
     // ID-urile Firestore auto generate au ~20 caractere alfanumerice.
     if (q.length >= 10) {
       tasks.push(
@@ -1057,24 +1027,9 @@ function BookingsPageContent() {
         // Filtrare specială pentru rezervările cu plată la parcare
         filtered = filtered.filter((b) => isPayOnSiteBooking(b))
       } else if (statusFilter === "occupied") {
-        // Ocupate = prezente (conform aceleiași reguli ca și contorul de Ocupare din tabel)
-        filtered = filtered.filter((b) => {
-          const lpr: any = (b as any)?.lpr || {}
-          if (getLprPresenceState({ lpr }).isEffectivelyInside) return true
-          if (lpr?.departedAt) return false
-          if (lpr?.arrivedAt && !lpr?.departedAt) return true
-          // Fără info LPR => considerăm prezent (încă nu avem ieșire confirmată)
-          return true
-        })
+        filtered = filtered.filter(b => getLprPresenceState({ lpr: b.lpr }).isEffectivelyInside)
       } else if (statusFilter === "exited") {
-        // Ieșite = restul (negarea regulii de "Ocupate")
-        filtered = filtered.filter((b) => {
-          const lpr: any = (b as any)?.lpr || {}
-          if (getLprPresenceState({ lpr }).isEffectivelyInside) return false
-          if (lpr?.departedAt) return true
-          if (lpr?.arrivedAt && !lpr?.departedAt) return false
-          return false
-        })
+        filtered = filtered.filter(b => !getLprPresenceState({ lpr: b.lpr }).isEffectivelyInside && Boolean(b.lpr?.departedAt))
       } else if (statusFilter === "online") {
         // Online = badge ONLINE (non-manual, non-pay_on_site, non-LPR fără rezervare)
         filtered = filtered.filter((b) => {
@@ -1398,7 +1353,7 @@ function BookingsPageContent() {
 
     setModificationActionLoading(`${action}:${requestId}`)
     try {
-      const res = await adminAuthorizedFetch(`/api/admin/bookings/modification-requests/${requestId}/${action}`, user, {
+      const res = await demoRequest(`/demo/bookings/modification-requests/${requestId}/${action}`, user, {
         method: "POST",
         body: JSON.stringify(body || {}),
       })
@@ -1504,7 +1459,7 @@ function BookingsPageContent() {
   const handleRecalculateOccupancy = async () => {
     setRecalculatingOcc(true)
     try {
-      const res = await adminAuthorizedFetch("/api/admin/occupancy", user, {
+      const res = await demoRequest("/demo/occupancy", user, {
         method: "POST",
         body: JSON.stringify({ action: "recalculate" }),
       })
@@ -1538,7 +1493,7 @@ function BookingsPageContent() {
     }
     setIsDeleting(true)
     try {
-      const res = await adminAuthorizedFetch("/api/admin/bookings/delete", user, {
+      const res = await demoRequest("/demo/bookings/delete", user, {
         method: "POST",
         body: JSON.stringify({ bookingId: bookingToDelete.id }),
       })
@@ -1633,7 +1588,7 @@ function BookingsPageContent() {
       // Send cancellation confirmation email to client (if available)
       if (booking.clientEmail) {
         try {
-          const res = await adminAuthorizedFetch("/api/admin/bookings/send-cancel-confirmation", user, {
+          const res = await demoRequest("/demo/bookings/send-cancel-confirmation", user, {
             method: "POST",
             body: JSON.stringify({
               bookingId: booking.id,
@@ -1647,15 +1602,15 @@ function BookingsPageContent() {
           toast({
             title: "Anulată",
             description: doApiCancel
-              ? "Rezervarea a fost anulată în Multipark și local, iar emailul de confirmare a fost trimis clientului."
-              : "Rezervarea a fost anulată local, iar emailul de confirmare a fost trimis clientului.",
+              ? "Rezervarea a fost anulată local, cu parcare simulată, iar emailul de confirmare a fost simulat."
+              : "Rezervarea a fost anulată local, iar emailul de confirmare a fost simulat.",
           })
         } catch (e) {
           console.error("Cancel confirmation email failed", e)
           toast({
             title: "Anulată (email eșuat)",
             description: doApiCancel
-              ? "Rezervarea a fost anulată în Multipark și local, dar emailul către client nu a putut fi trimis."
+              ? "Rezervarea a fost anulată local, cu parcare simulată, dar emailul către client nu a putut fi trimis."
               : "Rezervarea a fost anulată local, dar emailul către client nu a putut fi trimis.",
             variant: "destructive",
           })
@@ -1664,7 +1619,7 @@ function BookingsPageContent() {
         toast({
           title: "Anulată",
           description: doApiCancel
-            ? "Rezervarea a fost anulată în Multipark și local. (Clientul nu are email în rezervare.)"
+            ? "Rezervarea a fost anulată local, cu parcare simulată. (Clientul nu are email în rezervare.)"
             : "Rezervarea a fost anulată local. (Clientul nu are email în rezervare.)",
         })
       }
@@ -1834,7 +1789,7 @@ function BookingsPageContent() {
           bookingNumber: result.bookingNumber!,
           licensePlate: booking.licensePlate,
           clientName: booking.clientName || 'Client',
-          apiMessage: "Rezervarea a fost creată cu succes în API multipark!",
+          apiMessage: "Rezervarea a fost recuperată local; parcarea este simulată.",
           originalErrorCode: booking.apiErrorCode,
           originalError: booking.apiMessage
         })
@@ -2265,7 +2220,7 @@ function BookingsPageContent() {
 
     setRetryingOblioBookingId(booking.id)
     try {
-      const res = await adminAuthorizedFetch("/api/admin/bookings/retry-oblio-invoice", user, {
+      const res = await demoRequest("/demo/bookings/retry-oblio-invoice", user, {
         method: "POST",
         body: JSON.stringify({ bookingId: booking.id }),
       })
@@ -2278,8 +2233,8 @@ function BookingsPageContent() {
       toast({
         title: "Factură Oblio regenerată",
         description: json?.invoiceNumber
-          ? `Factura ${json.invoiceNumber} a fost generată cu succes.`
-          : "Factura Oblio a fost generată cu succes.",
+          ? `Factura ${json.invoiceNumber} a fost simulată local.`
+          : "Factura a fost simulată local.",
       })
 
       await fetchBookings()
@@ -3683,7 +3638,7 @@ function BookingsPageContent() {
                   {((manualLprBooking as any).lpr?.isInside === true) ? "În parcare (isInside=true)" : "În afara parcării"}
                 </div>
                 <div className="text-xs text-gray-500 mt-1">
-                  Notă: această acțiune scrie în Firestore ca un eveniment LPR: `lpr_events` + `gateEvents` + `bookings.lpr.*` + ocupare idempotentă.
+                  Notă: această acțiune scrie în demo ca un eveniment LPR: `lpr_events` + `gateEvents` + `bookings.lpr.*` + ocupare idempotentă.
                 </div>
               </div>
 
@@ -3801,7 +3756,7 @@ function BookingsPageContent() {
                 <h3 className="text-lg font-medium mb-2 text-gray-800">Informații Rezervare</h3>
                 <div className="space-y-1 text-sm break-words">
                   <p className="break-all">
-                    <strong>ID Firestore:</strong> {selectedBooking.id}
+                    <strong>ID demo:</strong> {selectedBooking.id}
                   </p>
                   <p>
                     <strong>Canal rezervare:</strong>{" "}

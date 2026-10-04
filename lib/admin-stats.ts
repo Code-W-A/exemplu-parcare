@@ -1,5 +1,5 @@
-import { db } from './firebase'
-import { collection, query, where, getDocs, orderBy, limit, Timestamp, doc, updateDoc, increment, serverTimestamp, getDoc } from 'firebase/firestore'
+import { db } from './demo-data'
+import { collection, query, where, getDocs, orderBy, limit, Timestamp, doc, updateDoc, increment, serverTimestamp, getDoc } from '@/lib/demo-data'
 import { getLprPresenceState } from '@/lib/lpr-presence'
 
 // Interfețe pentru tipurile de date
@@ -142,7 +142,6 @@ interface PriceTierEntry {
 let _cachedPriceTiers: PriceTierEntry[] | null = null
 
 async function loadPriceTiers(): Promise<PriceTierEntry[]> {
-  if (_cachedPriceTiers) return _cachedPriceTiers
   try {
     const snap = await getDocs(query(collection(db, 'prices'), orderBy('days')))
     const tiers: PriceTierEntry[] = []
@@ -160,7 +159,6 @@ async function loadPriceTiers(): Promise<PriceTierEntry[]> {
       }
     })
     tiers.sort((a, b) => a.days - b.days)
-    _cachedPriceTiers = tiers
     return tiers
   } catch (e) {
     console.error('Error loading price tiers:', e)
@@ -201,6 +199,7 @@ function computePriceFromTiers(days: number, tiers: PriceTierEntry[]): number {
 }
 
 function resolveBookingAmount(booking: any, tiers: PriceTierEntry[]): number {
+  if (booking.paymentStatus !== "paid" || String(booking.status).startsWith("cancelled")) return 0
   const amount = coerceMoney(booking.amount) ?? 0
   if (amount > 0) return amount
   const days = computeDurationDaysFromBooking(booking)

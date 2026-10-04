@@ -1,3 +1,0 @@
-# Robots.txt - No indexing allowed
-User-agent: *
-Disallow: / 

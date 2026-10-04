@@ -1,4 +1,5 @@
 "use client"
+import { useDemoRevision } from "@/hooks/use-demo-revision"
 
 import { useEffect, useMemo, useRef, useState } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -8,8 +9,8 @@ import { RefreshCw, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { getDailyEntries, getDailyExits, type DailyEntryExit } from "@/lib/admin-stats"
-import { addDoc, collection, deleteDoc, doc, getDoc, getDocs, orderBy, query, serverTimestamp, updateDoc, where, limit } from "firebase/firestore"
-import { db } from "@/lib/firebase"
+import { addDoc, collection, deleteDoc, doc, getDoc, getDocs, orderBy, query, serverTimestamp, updateDoc, where, limit } from "@/lib/demo-data"
+import { db } from "@/lib/demo-data"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -33,9 +34,9 @@ type EnrichedRow = DailyEntryExit & {
 const LATE_FEE_PER_DAY = 40 // lei / zi întârziere (online)
 const ONLINE_GRACE_MINUTES = 60 // 1h bonus la ultima zi (online)
 
-const DEBUG_ROW_DETAILS = process.env.NEXT_PUBLIC_ADMIN_ROW_DEBUG === "true"
-const DEBUG_EXIT_SIM = process.env.NEXT_PUBLIC_ADMIN_EXIT_SIM === "true" || DEBUG_ROW_DETAILS
-const DEBUG_EXIT_SIM_WRITE = process.env.NEXT_PUBLIC_ADMIN_EXIT_SIM_WRITE === "true"
+const DEBUG_ROW_DETAILS = false
+const DEBUG_EXIT_SIM = false
+const DEBUG_EXIT_SIM_WRITE = false
 
 // Toggle behavior for "Intrări întârziate":
 // - true: keep listed only until booking end date/time (new behavior)
@@ -266,6 +267,7 @@ function getScheduledSortKey(row: Partial<EnrichedRow>, kind: "entry" | "exit", 
 }
 
 export default function EntriesExitsPage() {
+  const demoRevision = useDemoRevision()
   const { toast } = useToast()
   const { user, isAdmin } = useAuth()
   const [isClient, setIsClient] = useState(false)
@@ -378,7 +380,7 @@ export default function EntriesExitsPage() {
       loadPrices()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isClient, selectedDate, includeFuture])
+  }, [isClient, selectedDate, includeFuture, demoRevision])
 
   useEffect(() => {
     const tick = () => setCurrentTime(new Date().toTimeString().slice(0, 5))
@@ -396,7 +398,7 @@ export default function EntriesExitsPage() {
     }, 60000)
     return () => clearInterval(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isClient, selectedDate, includeFuture])
+  }, [isClient, selectedDate, includeFuture, demoRevision])
 
   const openManualLprDialog = (row: EnrichedRow, kind: ManualLprKind) => {
     const fallbackDate =
@@ -1319,7 +1321,7 @@ export default function EntriesExitsPage() {
       setSimWriting(true)
       const ref = await addDoc(collection(db, "bookings"), bookingDoc)
       toast({
-        title: "Salvat în Firestore",
+        title: "Salvat în demo",
         description: `Creat bookings/${ref.id}. Dă refresh ca să apară din baza de date.`,
       })
       setSimDialogOpen(false)
@@ -1327,7 +1329,7 @@ export default function EntriesExitsPage() {
     } catch (e: any) {
       toast({
         title: "Eroare la salvare",
-        description: e?.message ? String(e.message) : "Nu am putut salva rezervarea în Firestore.",
+        description: e?.message ? String(e.message) : "Nu am putut salva rezervarea în demo.",
         variant: "destructive",
       })
     } finally {
@@ -1379,7 +1381,7 @@ export default function EntriesExitsPage() {
       await deleteDoc(doc(db, "bookings", id))
       toast({
         title: "Șters",
-        description: `Documentul bookings/${id} a fost șters din Firestore.`,
+        description: `Documentul bookings/${id} a fost șters din demo.`,
       })
       closeDebugDialog()
       await loadData()
@@ -2058,7 +2060,7 @@ export default function EntriesExitsPage() {
           </DialogHeader>
 
           {debugDialog.loading ? (
-            <div className="text-sm text-gray-600">Se încarcă detaliile din Firestore…</div>
+            <div className="text-sm text-gray-600">Se încarcă detaliile din demo…</div>
           ) : debugDialog.error ? (
             <div className="text-sm text-red-700">Eroare: {debugDialog.error}</div>
           ) : (
@@ -2171,7 +2173,7 @@ export default function EntriesExitsPage() {
                   onClick={deleteDebugBooking}
                   disabled={debugDialog.deleting || !String(debugDialog.deleteConfirm || "").trim()}
                 >
-                  {debugDialog.deleting ? "Se șterge..." : "Șterge din Firestore"}
+                  {debugDialog.deleting ? "Se șterge..." : "Șterge din demo"}
                 </Button>
               </div>
             )}

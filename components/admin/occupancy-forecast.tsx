@@ -1,4 +1,5 @@
 "use client"
+import { useDemoRevision } from "@/hooks/use-demo-revision"
 
 import { useEffect, useMemo, useState } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -7,8 +8,8 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Loader2, RefreshCw } from "lucide-react"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { db } from "@/lib/firebase"
-import { doc, onSnapshot } from "firebase/firestore"
+import { db } from "@/lib/demo-data"
+import { doc, onSnapshot } from "@/lib/demo-data"
 import {
   computeDailyForecastOccupancy,
   type DailyForecastRow,
@@ -30,6 +31,7 @@ function addDays(d: Date, days: number): Date {
 }
 
 export function OccupancyForecast() {
+  const demoRevision = useDemoRevision()
   const [range, setRange] = useState<DateRange>(() => {
     const today = new Date()
     const from = toIsoDate(addDays(today, 1))
@@ -60,7 +62,7 @@ export function OccupancyForecast() {
 
   const canCompute = useMemo(() => {
     return Boolean(range.from) && Boolean(range.to) && range.from <= range.to
-  }, [range.from, range.to])
+  }, [range.from, range.to, demoRevision])
 
   const reload = async () => {
     if (!canCompute) {
@@ -90,7 +92,7 @@ export function OccupancyForecast() {
   useEffect(() => {
     reload()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [range.from, range.to])
+  }, [range.from, range.to, demoRevision])
 
   return (
     <div className="space-y-4">

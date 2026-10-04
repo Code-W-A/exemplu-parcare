@@ -1,11 +1,12 @@
 "use client"
+import { useDemoRevision } from "@/hooks/use-demo-revision"
 
 import { useMemo, useState, useEffect } from "react"
 import { Card, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { AlertTriangle, Car } from "lucide-react"
-import { db } from "@/lib/firebase"
-import { collection, doc, getCountFromServer, getDocs, limit, onSnapshot, orderBy, query, where } from "firebase/firestore"
+import { db } from "@/lib/demo-data"
+import { collection, doc, getCountFromServer, getDocs, limit, onSnapshot, orderBy, query, where } from "@/lib/demo-data"
 import { cn } from "@/lib/utils"
 import { format as formatDateFn } from "date-fns"
 
@@ -47,6 +48,7 @@ export function OccupancyCounter({
   range,
   countOverride,
 }: OccupancyCounterProps) {
+  const demoRevision = useDemoRevision()
   const [occupiedCount, setOccupiedCount] = useState<number>(0)
   const [fallbackOccupiedCount, setFallbackOccupiedCount] = useState<number>(0)
   const [activeRangeCount, setActiveRangeCount] = useState<number>(0)
@@ -69,7 +71,7 @@ export function OccupancyCounter({
       }
     )
     return () => unsub()
-  }, [mode])
+  }, [mode, demoRevision])
 
   // Fallback: dacă parkingLive e 0/stale, calculează ocuparea din realitatea LPR (count where lpr.isInside=true)
   useEffect(() => {
@@ -93,7 +95,7 @@ export function OccupancyCounter({
       cancelled = true
       clearInterval(id)
     }
-  }, [mode])
+  }, [mode, demoRevision])
 
   // mode="active": calculează ocuparea pentru zi/interval:
   // (1) Rezervări active care se suprapun peste range-ul selectat (manual + pay_on_site + online paid)
@@ -166,7 +168,7 @@ export function OccupancyCounter({
       cancelled = true
       clearInterval(id)
     }
-  }, [mode, range?.from, range?.to])
+  }, [mode, range?.from, range?.to, demoRevision])
 
   // Snapshot pentru maxLimit din reservationSettings
   useEffect(() => {

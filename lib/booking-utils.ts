@@ -1,5 +1,5 @@
-import { collection, query, where, getDocs, doc, updateDoc, serverTimestamp, increment } from 'firebase/firestore'
-import { db } from '@/lib/firebase'
+import { collection, query, where, getDocs, doc, updateDoc, serverTimestamp, increment } from '@/lib/demo-data'
+import { db } from '@/lib/demo-data'
 import { getLprPresenceState } from '@/lib/lpr-presence'
 import { normalizeLicensePlate } from '@/lib/utils'
 
@@ -192,7 +192,7 @@ export async function checkAvailability(
     // Încarcă setările din Firestore pentru a obține numărul maxim real
     let maxTotalReservations = 100 // Default fallback
     try {
-      const settingsDoc = await import('firebase/firestore').then(f => f.getDoc(f.doc(db, 'config', 'reservationSettings')))
+      const settingsDoc = await import('@/lib/demo-data').then(f => f.getDoc(f.doc(db, 'config', 'reservationSettings')))
       if (settingsDoc.exists()) {
         const settings = settingsDoc.data()
         maxTotalReservations = settings.maxTotalReservations || 100

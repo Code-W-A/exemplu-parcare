@@ -1,4 +1,4 @@
-import type { MobilePaymentProvider } from "@/lib/mobile-booking-mapper"
+type MobilePaymentProvider = "stripe" | "netopia"
 
 export type AppUpdateSettings = {
   enabled: boolean

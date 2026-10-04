@@ -1,4 +1,5 @@
 "use client"
+import { useDemoRevision } from "@/hooks/use-demo-revision"
 
 import { useEffect, useMemo, useState } from "react"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
@@ -13,9 +14,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { OccupancyForecast } from "@/components/admin/occupancy-forecast"
 import { useSearchParams } from "next/navigation"
 import { useAuth } from "@/context/auth-context"
-import { auth } from "@/lib/firebase"
-import { adminAuthorizedFetch } from "@/lib/admin-authorized-fetch"
-import { EmailAuthProvider, reauthenticateWithCredential } from "firebase/auth"
+import { demoRequest } from "@/lib/demo-request"
 import { useToast } from "@/components/ui/use-toast"
 import { writeManualLprEvent } from "@/lib/manual-lpr-event"
 import {
@@ -55,6 +54,7 @@ type RemoveDialogState = {
 }
 
 export default function OccupancyPage() {
+  const demoRevision = useDemoRevision()
   const searchParams = useSearchParams()
   const { user, isAdmin } = useAuth()
   const { toast } = useToast()
@@ -69,13 +69,11 @@ export default function OccupancyPage() {
   })
   const [removingId, setRemovingId] = useState<string | null>(null)
   const [dangerOpen, setDangerOpen] = useState(false)
-  const [dangerPassword, setDangerPassword] = useState("")
   const [dangerConfirmText, setDangerConfirmText] = useState("")
   const [dangerChecked, setDangerChecked] = useState(false)
   const [dangerError, setDangerError] = useState<string | null>(null)
   const [reauthing, setReauthing] = useState(false)
   const [reverseOpen, setReverseOpen] = useState(false)
-  const [reversePassword, setReversePassword] = useState("")
   const [reverseConfirmText, setReverseConfirmText] = useState("")
   const [reverseChecked, setReverseChecked] = useState(false)
   const [reverseError, setReverseError] = useState<string | null>(null)
@@ -100,7 +98,7 @@ export default function OccupancyPage() {
     setLoading(true)
     setError(null)
     try {
-      const res = await adminAuthorizedFetch("/api/admin/occupancy", user)
+      const res = await demoRequest("/demo/occupancy", user)
       if (!res.ok) throw new Error(`Status ${res.status}`)
       const json = await res.json()
       setData(json)
@@ -113,7 +111,7 @@ export default function OccupancyPage() {
 
   useEffect(() => {
     fetchData()
-  }, [user])
+  }, [user, demoRevision])
 
   const isPaid = (status: string) => status === "paid"
 
@@ -184,7 +182,7 @@ export default function OccupancyPage() {
     setResetting(true)
     setError(null)
     try {
-      const res = await adminAuthorizedFetch("/api/admin/occupancy", user, { method: "POST" })
+      const res = await demoRequest("/demo/occupancy", user, { method: "POST" })
       if (!res.ok) throw new Error(`Status ${res.status}`)
       await fetchData()
     } catch (e) {
@@ -198,7 +196,7 @@ export default function OccupancyPage() {
     setResetting(true)
     setError(null)
     try {
-      const res = await adminAuthorizedFetch("/api/admin/occupancy", user, {
+      const res = await demoRequest("/demo/occupancy", user, {
         method: "POST",
         body: JSON.stringify({ action: "recalculate" }),
       })
@@ -305,7 +303,7 @@ export default function OccupancyPage() {
     setResetting(true)
     setError(null)
     try {
-      const res = await adminAuthorizedFetch("/api/admin/occupancy", user, {
+      const res = await demoRequest("/demo/occupancy", user, {
         method: "POST",
         body: JSON.stringify({ action: "set_all_outside" }),
       })
@@ -325,7 +323,6 @@ export default function OccupancyPage() {
       return
     }
     setDangerError(null)
-    setDangerPassword("")
     setDangerConfirmText("")
     setDangerChecked(false)
     setDangerOpen(true)
@@ -337,7 +334,6 @@ export default function OccupancyPage() {
       return
     }
     setReverseError(null)
-    setReversePassword("")
     setReverseConfirmText("")
     setReverseChecked(false)
     setReversePreview(null)
@@ -347,9 +343,9 @@ export default function OccupancyPage() {
     try {
       setReversePreviewLoading(true)
       // Window is UTC (Bookings shows LPR in UTC).
-      const fromIso = "2025-12-25T12:15:00Z"
-      const toIso = "2025-12-25T12:22:59Z"
-      const resPreview = await adminAuthorizedFetch("/api/admin/occupancy", user, {
+      const fromIso = "2000-01-01T00:00:00Z"
+      const toIso = "2099-12-31T23:59:59Z"
+      const resPreview = await demoRequest("/demo/occupancy", user, {
         method: "POST",
         body: JSON.stringify({ action: "reverse_set_all_outside_window_preview", fromIso, toIso }),
       })
@@ -392,23 +388,9 @@ export default function OccupancyPage() {
       setReversing(true)
 
       // Window is UTC (Bookings shows LPR in UTC).
-      const fromIso = "2025-12-25T12:15:00Z"
-      const toIso = "2025-12-25T12:22:59Z"
-      // Single-step execute: require password + reauth (preview is computed on dialog open).
-      if (!reversePassword.trim()) {
-        setReverseError("Introdu parola contului.")
-        return
-      }
-      const current = auth.currentUser
-      const email = current?.email || user?.email
-      if (!current || !email) {
-        setReverseError("Sesiune invalidă. Reautentificarea nu este posibilă.")
-        return
-      }
-      const cred = EmailAuthProvider.credential(email, reversePassword)
-      await reauthenticateWithCredential(current, cred)
-
-      const res = await adminAuthorizedFetch("/api/admin/occupancy", user, {
+      const fromIso = "2000-01-01T00:00:00Z"
+      const toIso = "2099-12-31T23:59:59Z"
+      const res = await demoRequest("/demo/occupancy", user, {
         method: "POST",
         body: JSON.stringify({ action: "reverse_set_all_outside_window", fromIso, toIso }),
       })
@@ -442,25 +424,13 @@ export default function OccupancyPage() {
       setDangerError('Tastează "RESET" pentru confirmare.')
       return
     }
-    if (!dangerPassword.trim()) {
-      setDangerError("Introdu parola contului.")
-      return
-    }
-    const current = auth.currentUser
-    const email = current?.email || user?.email
-    if (!current || !email) {
-      setDangerError("Sesiune invalidă. Reautentificarea nu este posibilă.")
-      return
-    }
     try {
       setReauthing(true)
-      const cred = EmailAuthProvider.credential(email, dangerPassword)
-      await reauthenticateWithCredential(current, cred)
       await performSetAllOutside()
       setDangerOpen(false)
     } catch (e) {
       console.error("Reauth / set_all_outside failed", e)
-      setDangerError("Reautentificarea a eșuat sau acțiunea nu a putut fi executată.")
+      setDangerError("Acțiunea nu a putut fi executată în demo.")
     } finally {
       setReauthing(false)
     }
@@ -498,7 +468,7 @@ export default function OccupancyPage() {
 
             <Button variant="outline" onClick={handleReverseWindow} disabled={resetting || loading || reversing}>
               {reversing ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <RefreshCw className="h-4 w-4 mr-2" />}
-              Reverse (25 Dec 12:15–12:22 UTC)
+              Reverse (25 Dec simulată UTC)
             </Button> */}
 
             <Button onClick={fetchData} disabled={loading}>
@@ -692,17 +662,7 @@ export default function OccupancyPage() {
               />
             </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="danger-password">Parola contului</Label>
-              <Input
-                id="danger-password"
-                type="password"
-                value={dangerPassword}
-                onChange={(e) => setDangerPassword(e.target.value)}
-                placeholder="••••••••"
-                disabled={reauthing || resetting}
-              />
-            </div>
+
           </div>
 
           <AlertDialogFooter>
@@ -719,10 +679,7 @@ export default function OccupancyPage() {
           <AlertDialogHeader>
             <AlertDialogTitle>Confirmare: Reverse set_all_outside (fereastră fixă)</AlertDialogTitle>
             <AlertDialogDescription>
-              Această acțiune caută booking-urile cu <code>lpr.departedAt</code> (Timestamp) între{" "}
-              <strong>2025-12-25 12:15</strong> și <strong>12:22</strong> (UTC) și le marchează înapoi ca{" "}
-              <code>lpr.isInside=true</code>, ștergând <code>lpr.departedAt</code>. Apoi recalculează contorul din{" "}
-              <code>lpr.isInside=true</code>.
+              Restaurează prezența mașinilor din ultima operație demo de scoatere a tuturor din parcare. Ocuparea se recalculează din datele restaurate.
             </AlertDialogDescription>
           </AlertDialogHeader>
 
@@ -734,10 +691,10 @@ export default function OccupancyPage() {
             <div className="rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
               Preview:
               <div className="mt-1">
-                - candidates în interval: <strong>{reversePreview.candidates}</strong>
+                - Mașini disponibile pentru restaurare: <strong>{reversePreview.candidates}</strong>
               </div>
               <div>
-                - vor fi reverse: <strong>{reversePreview.willReverse}</strong>
+                - vor fi restaurate: <strong>{reversePreview.willReverse}</strong>
               </div>
               <div className="text-xs text-blue-800 mt-1">
                 (skip: notTimestamp={reversePreview.skippedNotTimestamp}, notMatch={reversePreview.skippedNotMatch})
@@ -769,22 +726,7 @@ export default function OccupancyPage() {
               />
             </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="reverse-password">Parola contului</Label>
-              <Input
-                id="reverse-password"
-                type="password"
-                value={reversePassword}
-                onChange={(e) => setReversePassword(e.target.value)}
-                placeholder="••••••••"
-                disabled={reversing || resetting || reversePreviewLoading || !reversePreview}
-              />
-              {(!reversePreview || reversePreviewLoading) && (
-                <div className="text-xs text-muted-foreground">
-                  Parola se activează după ce se încarcă preview-ul.
-                </div>
-              )}
-            </div>
+
           </div>
 
           <AlertDialogFooter>

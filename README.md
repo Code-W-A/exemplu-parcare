@@ -1,7 +1,5 @@
-# Parcări Admin Demo
+# White label parking admin demo
 
-Panou Next.js cu Firebase separat și date fictive persistente.
+Panou Next.js cu date fictive locale, acces direct și persistență în browser. Fără Firebase și fără conexiuni la servicii reale.
 
-Instrucțiuni, variabile Vercel și blocajul actual al cheii serverului: [README_DEMO.md](README_DEMO.md).
-
-Nu este publicat. Nu activa facturarea sau Cloud Functions pentru această copie.
+Instrucțiunile de rulare, resetare și Vercel sunt în [README_DEMO.md](README_DEMO.md).

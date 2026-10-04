@@ -1,4 +1,5 @@
 "use client"
+import { useDemoRevision } from "@/hooks/use-demo-revision"
 
 import { useState, useEffect } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -42,6 +43,7 @@ const COLORS = ["#22c55e", "#e5e7eb"]
 const STATUS_COLORS = ["#22c55e", "#f59e0b", "#ef4444"]
 
 export default function DashboardPage() {
+  const demoRevision = useDemoRevision()
   const [isClient, setIsClient] = useState(false)
   const [loading, setLoading] = useState(true)
   
@@ -76,7 +78,7 @@ export default function DashboardPage() {
     if (isClient) {
       loadAllData()
     }
-  }, [isClient])
+  }, [isClient, demoRevision])
 
   const loadAllData = async () => {
     try {
@@ -142,9 +144,14 @@ export default function DashboardPage() {
 
   const getStatusLabel = (status: string) => {
     switch (status) {
+      case 'confirmed_paid':
+      case 'confirmed_test':
+      case 'confirmed_pay_on_site':
       case 'confirmed':
       case 'paid':
         return 'Confirmată'
+      case 'cancelled_by_admin':
+      case 'cancelled_by_api':
       case 'cancelled':
         return 'Anulată'
       default:
@@ -154,9 +161,14 @@ export default function DashboardPage() {
 
   const getStatusColor = (status: string) => {
     switch (status) {
+      case 'confirmed_paid':
+      case 'confirmed_test':
+      case 'confirmed_pay_on_site':
       case 'confirmed':
       case 'paid':
         return 'text-green-600'
+      case 'cancelled_by_admin':
+      case 'cancelled_by_api':
       case 'cancelled':
         return 'text-red-600'
       default:

@@ -1,4 +1,5 @@
 "use client"
+import { useDemoRevision } from "@/hooks/use-demo-revision"
 
 import { useCallback, useEffect, useState } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -27,7 +28,7 @@ import {
 } from "@/components/ui/dialog"
 import { Loader2, Plus, ShieldAlert, Trash2, UserPlus } from "lucide-react"
 import { useAuth } from "@/context/auth-context"
-import { adminAuthorizedFetch } from "@/lib/admin-authorized-fetch"
+import { demoRequest } from "@/lib/demo-request"
 
 type EntriesUser = {
   uid: string
@@ -67,6 +68,7 @@ function formatDate(value: string | null) {
 }
 
 export default function CreateEmployeePage() {
+  const demoRevision = useDemoRevision()
   const { user, loading, isAdmin } = useAuth()
   const [name, setName] = useState("")
   const [email, setEmail] = useState("")
@@ -97,7 +99,7 @@ export default function CreateEmployeePage() {
     setLoadingUsers(true)
     setListError("")
     try {
-      const response = await adminAuthorizedFetch("/api/admin/users/create", user)
+      const response = await demoRequest("/demo/users/create", user)
       const json = await response.json().catch(() => null)
       if (!response.ok) {
         throw new Error(json?.error || `HTTP ${response.status}`)
@@ -117,7 +119,7 @@ export default function CreateEmployeePage() {
     }
 
     void loadUsers()
-  }, [loading, isAdmin, user, loadUsers])
+  }, [loading, isAdmin, user, loadUsers, demoRevision])
 
   const openToggleDialog = (entryUser: EntriesUser) => {
     setToggleTargetUser(entryUser)
@@ -143,7 +145,7 @@ export default function CreateEmployeePage() {
     setActionType("toggle")
 
     try {
-      const response = await adminAuthorizedFetch("/api/admin/users/create", user, {
+      const response = await demoRequest("/demo/users/create", user, {
         method: "PATCH",
         body: JSON.stringify({
           uid: entryUser.uid,
@@ -194,7 +196,7 @@ export default function CreateEmployeePage() {
     setActionType("delete")
 
     try {
-      const response = await adminAuthorizedFetch("/api/admin/users/create", user, {
+      const response = await demoRequest("/demo/users/create", user, {
         method: "DELETE",
         body: JSON.stringify({
           uid: entryUser.uid,
@@ -238,7 +240,7 @@ export default function CreateEmployeePage() {
     setSuccess("")
 
     try {
-      const response = await adminAuthorizedFetch("/api/admin/users/create/reset-password", user, {
+      const response = await demoRequest("/demo/users/create/reset-password", user, {
         method: "POST",
         body: JSON.stringify({
           uid: resetTargetUser.uid,
@@ -275,7 +277,7 @@ export default function CreateEmployeePage() {
 
     setSaving(true)
     try {
-      const response = await adminAuthorizedFetch("/api/admin/users/create", user, {
+      const response = await demoRequest("/demo/users/create", user, {
         method: "POST",
         body: JSON.stringify({
           name,
@@ -339,7 +341,7 @@ export default function CreateEmployeePage() {
               Conturi angajați Entries/Exits
             </CardTitle>
             <CardDescription>
-              Gestionezi operatorii Intrări/Ieșiri. Apasă `+` pentru a crea un cont nou.
+              Conturi fictive pentru demonstrație. Crearea și resetarea parolelor sunt simulate local; nu permit autentificare reală.
             </CardDescription>
           </div>
 

@@ -1,5 +1,6 @@
 // ReservationLimitManager v2 – limită + toggle activare, fără defocus & cu flux logic robust
 "use client"
+import { useDemoRevision } from "@/hooks/use-demo-revision"
 
 import { useState, useEffect, useRef, type ChangeEvent } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -7,16 +8,17 @@ import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
 import { Settings, Save, Loader2, Power, PowerOff, AlertTriangle, RefreshCw } from "lucide-react"
-import { db } from "@/lib/firebase"
-import { doc, setDoc, onSnapshot, collection, query, getCountFromServer, where, getDocs, updateDoc, serverTimestamp, increment } from "firebase/firestore"
+import { db } from "@/lib/demo-data"
+import { doc, setDoc, onSnapshot, collection, query, getCountFromServer, where, getDocs, updateDoc, serverTimestamp, increment } from "@/lib/demo-data"
 import { useToast } from "@/components/ui/use-toast"
 import { Badge } from "@/components/ui/badge"
 import { Label } from "@/components/ui/label"
 import { OccupancyCounter } from "./occupancy-counter"
 import { useAuth } from "@/context/auth-context"
-import { adminAuthorizedFetch } from "@/lib/admin-authorized-fetch"
+import { demoRequest } from "@/lib/demo-request"
 
 export function ReservationLimitManager() {
+  const demoRevision = useDemoRevision()
   const { toast } = useToast()
   const { user } = useAuth()
 
@@ -103,7 +105,7 @@ export function ReservationLimitManager() {
   }, [])
 
   // IMPORTANT: Keep the dashboard occupancy card consistent with /admin/dashboard/ocupare:
-  // use strict LPR reality (count of bookings where lpr.isInside == true) via /api/admin/occupancy
+  // use strict LPR reality (count of bookings where lpr.isInside == true) via /demo/occupancy
   useEffect(() => {
     let cancelled = false
 
@@ -111,7 +113,7 @@ export function ReservationLimitManager() {
       if (!user) return
 
       try {
-        const res = await adminAuthorizedFetch("/api/admin/occupancy", user)
+        const res = await demoRequest("/demo/occupancy", user)
         if (!res.ok) return
         const json = (await res.json()) as { occupiedCount?: number; plates?: any[] }
         const count =
@@ -132,7 +134,7 @@ export function ReservationLimitManager() {
       cancelled = true
       clearInterval(id)
     }
-  }, [user])
+  }, [user, demoRevision])
 
   /*──────────────────────────────────┐
   │   HANDLERS                       │

@@ -1,8 +1,9 @@
 "use client"
+import { useDemoRevision } from "@/hooks/use-demo-revision"
 
 import { useEffect, useState } from "react"
-import { collection, deleteDoc, doc, getDocs, serverTimestamp, setDoc } from "firebase/firestore"
-import { db } from "@/lib/firebase"
+import { collection, deleteDoc, doc, getDocs, serverTimestamp, setDoc } from "@/lib/demo-data"
+import { db } from "@/lib/demo-data"
 import { normalizeLicensePlate } from "@/lib/utils"
 import { useAuth } from "@/context/auth-context"
 import { useToast } from "@/components/ui/use-toast"
@@ -19,6 +20,7 @@ interface WhitelistEntry {
 }
 
 export default function WhitelistPage() {
+  const demoRevision = useDemoRevision()
   const { user, loading: authLoading } = useAuth()
   const { toast } = useToast()
 
@@ -57,7 +59,7 @@ export default function WhitelistPage() {
       setIsLoading(false)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authLoading, user])
+  }, [authLoading, user, demoRevision])
 
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault()

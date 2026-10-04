@@ -1,4 +1,5 @@
 "use client"
+import { useDemoRevision } from "@/hooks/use-demo-revision"
 
 import { useState, useEffect } from "react"
 import { Button } from "@/components/ui/button"
@@ -34,6 +35,7 @@ interface RecoveryStats {
 }
 
 export default function RecoveryPage() {
+  const demoRevision = useDemoRevision()
   const { user } = useAuth()
   const { toast } = useToast()
 
@@ -50,7 +52,7 @@ export default function RecoveryPage() {
   // Încarcă statisticile la mount
   useEffect(() => {
     loadStats()
-  }, [])
+  }, [demoRevision])
 
   const loadStats = async () => {
     try {
@@ -195,9 +197,8 @@ export default function RecoveryPage() {
             Atenție: {stats.paidFailures} rezervări cu plăți procesate
           </AlertTitle>
           <AlertDescription className="text-red-700">
-            Există {stats.paidFailures} rezervări unde banii au fost luați prin Stripe dar 
-            API-ul de parcare a eșuat. Aceste rezervări trebuie recuperate urgent pentru 
-            a evita reclamațiile clienților. Suma totală afectată: <strong>{stats.totalAmount.toFixed(2)} RON</strong>.
+            Există {stats.paidFailures} rezervări unde plata este marcată fictiv ca procesată dar
+            integrarea fictivă este marcată cu eroare. Recuperarea actualizează doar datele locale. Suma demonstrativă: <strong>{stats.totalAmount.toFixed(2)} RON</strong>.
           </AlertDescription>
         </Alert>
       )}
@@ -207,7 +208,7 @@ export default function RecoveryPage() {
         <CardHeader>
           <CardTitle>Acțiuni Recovery</CardTitle>
           <CardDescription>
-            Încearcă să recuperezi rezervările eșuate prin reapelarea API-ului de parcare
+            Recuperează rezervările fictive printr-o operație locală simulată.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -298,20 +299,16 @@ export default function RecoveryPage() {
         </CardHeader>
         <CardContent className="space-y-2 text-sm">
           <p>
-            <strong>1. Identificare:</strong> Systemul găsește rezervările cu status "api_error" 
-            dar cu plata procesată cu succes.
+            <strong>1. Identificare:</strong> Se identifică rezervările fictive cu eroare și plată marcată ca procesată.
           </p>
           <p>
-            <strong>2. Retry API:</strong> Pentru fiecare rezervare eșuată, se încearcă din nou 
-            apelul către API-ul de parcare cu timeout extins de 45 secunde.
+            <strong>2. Retry API:</strong> Pentru fiecare rezervare se generează un răspuns local de succes, fără conexiune la parcare.
           </p>
           <p>
-            <strong>3. Actualizare:</strong> Dacă API-ul reușește, rezervarea este marcată ca 
-            "confirmed_paid" și se generează numărul de rezervare.
+            <strong>3. Actualizare:</strong> Rezervarea este marcată ca recuperată, iar listele și statisticile folosesc datele actualizate.
           </p>
           <p>
-            <strong>4. Notificare:</strong> După recovery, se pot trimite automat email-urile 
-            de confirmare către clienți.
+            <strong>4. Notificare:</strong> Emailurile de confirmare sunt simulate; nu se trimite niciun mesaj.
           </p>
         </CardContent>
       </Card>

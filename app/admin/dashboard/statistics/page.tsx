@@ -1,4 +1,5 @@
 "use client"
+import { useDemoRevision } from "@/hooks/use-demo-revision"
 
 import { useState, useEffect } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -43,12 +44,13 @@ import {
   type ExpiredReservation,
   type DailyEntryExit,
 } from "@/lib/admin-stats"
-import { db } from "@/lib/firebase"
-import { doc, onSnapshot } from "firebase/firestore"
+import { db } from "@/lib/demo-data"
+import { doc, onSnapshot } from "@/lib/demo-data"
 
 const COLORS = ["#22c55e", "#f59e0b", "#ef4444", "#3b82f6", "#8b5cf6"]
 
 export default function StatisticsPage() {
+  const demoRevision = useDemoRevision()
   const [isClient, setIsClient] = useState(false)
   const [loading, setLoading] = useState(true)
   const [selectedDate, setSelectedDate] = useState('')
@@ -106,7 +108,7 @@ export default function StatisticsPage() {
     if (isClient && selectedDate) {
       loadStatistics()
     }
-  }, [isClient, selectedDate])
+  }, [isClient, selectedDate, demoRevision])
 
   const loadStatistics = async () => {
     try {

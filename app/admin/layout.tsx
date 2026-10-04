@@ -17,6 +17,7 @@ import {
   ShieldCheck,
   UserPlus,
 } from "lucide-react"
+import { DemoControls } from "@/components/admin/demo-controls"
 import { canAccessAdminPath, getAdminRoleLabel } from "@/lib/admin-roles"
 
 function AdminLayoutContent({ children }: { children: ReactNode }) {
@@ -129,15 +130,7 @@ function AdminLayoutContent({ children }: { children: ReactNode }) {
               <p className="text-gray-500">{role ? getAdminRoleLabel(role) : "Utilizator"}</p>
             </div>
           </div>
-          <Button
-            onClick={signOut}
-            variant="outline"
-            size="sm"
-            className="w-full justify-start"
-          >
-            <LogOut className="mr-2 h-4 w-4" />
-            Deconectare
-          </Button>
+
         </div>
       </div>
     )
@@ -163,7 +156,7 @@ function AdminLayoutContent({ children }: { children: ReactNode }) {
 
         {/* Main Content */}
         <div className="flex-1 flex flex-col overflow-hidden">
-          <div role="status" className="bg-amber-100 px-4 py-2 text-sm text-amber-950">Mediu de test · Date fictive · Parcarea, emailurile, plățile și facturile sunt simulate.</div>
+          <DemoControls />
           {/* Mobile Header */}
           <div className="md:hidden bg-white shadow-sm border-b px-4 py-3 flex items-center justify-between">
             <Button

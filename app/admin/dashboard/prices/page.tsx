@@ -1,8 +1,8 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { collection, getDocs, doc, updateDoc, addDoc, deleteDoc, query, orderBy, writeBatch, setDoc, onSnapshot } from "firebase/firestore"
-import { db } from "@/lib/firebase" // Importă instanța db
+import { collection, getDocs, doc, updateDoc, addDoc, deleteDoc, query, orderBy, writeBatch, setDoc, onSnapshot } from "@/lib/demo-data"
+import { db } from "@/lib/demo-data" // Importă instanța db
 import {
   DEFAULT_MOBILE_ONLINE_DISCOUNT_PERCENT,
   normalizeMobileOnlineDiscountPercent,

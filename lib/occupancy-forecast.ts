@@ -1,5 +1,5 @@
-import { collection, getDocs, limit, orderBy, query, where } from "firebase/firestore"
-import { db } from "@/lib/firebase"
+import { collection, getDocs, limit, orderBy, query, where } from "@/lib/demo-data"
+import { db } from "@/lib/demo-data"
 import { getLprPresenceState } from "@/lib/lpr-presence"
 
 export type DailyForecastRow = {

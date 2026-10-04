@@ -1,4 +1,4 @@
-import { db } from "@/lib/firebase"
+import { db } from "@/lib/demo-data"
 import {
   addDoc,
   collection,
@@ -8,7 +8,7 @@ import {
   serverTimestamp,
   setDoc,
   updateDoc,
-} from "firebase/firestore"
+} from "@/lib/demo-data"
 import { getLprPresenceState } from "@/lib/lpr-presence"
 
 export type ManualLprEventType = "entry" | "exit"

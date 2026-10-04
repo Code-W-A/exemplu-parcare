@@ -730,14 +730,13 @@ export default function ApiTestPage() {
                 <div className="flex justify-between">
                   <span className="text-gray-500">URL API:</span>
                   <span className="text-right font-mono text-sm">
-                    {process.env.NEXT_PUBLIC_PARKING_API_URL ||
-                      "http://127.0.0.1:7001/MultiparkWeb_eServices/booking_submit"}
+                    Simulare locală — fără conexiune
                   </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-gray-500">Multipark ID:</span>
                   <span className="text-right font-mono text-sm">
-                    {process.env.NEXT_PUBLIC_PARKING_MULTIPARK_ID || "001#002"}
+                    DEMO
                   </span>
                 </div>
               </div>
