@@ -1,0 +1,5156 @@
+"use client"
+
+import { AlertDescription } from "@/components/ui/alert"
+
+import { AlertTitle } from "@/components/ui/alert"
+
+import { Alert } from "@/components/ui/alert"
+
+import { useState, useEffect, Suspense, useCallback, useRef } from "react"
+import {
+  collection,
+  getDocs,
+  getDoc,
+  doc,
+  updateDoc,
+  query,
+  orderBy,
+  Timestamp, // Import Timestamp (runtime + type)
+  increment,
+  serverTimestamp,
+  setDoc,
+  onSnapshot,
+  where,
+  limit,
+  startAfter,
+  documentId,
+} from "firebase/firestore"
+import { db } from "@/lib/firebase"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Skeleton } from "@/components/ui/skeleton"
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import { Badge } from "@/components/ui/badge"
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import type { DateRange } from "react-day-picker"
+import { format as formatDateFn, parseISO, subDays, startOfDay, endOfDay, differenceInCalendarDays } from "date-fns" // Renamed to avoid conflict
+import { ro } from "date-fns/locale"
+import { CalendarIcon, MoreHorizontal, Search, Eye, Loader2, AlertCircle, RefreshCw, Mail, Info, Trash2, Pencil } from "lucide-react"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { useToast } from "@/components/ui/use-toast"
+import { useAuth } from "@/context/auth-context"
+import { cancelBooking as cancelParkingApiBooking, cleanupExpiredBookings, createManualBooking, sendManualBookingEmail } from "@/app/actions/booking-actions" // Acțiunea server pentru API parcare
+import { recoverSpecificBooking } from "@/app/actions/booking-recovery" // Recovery pentru rezervări eșuate
+import { TimePickerDemo } from "@/components/time-picker"
+import { checkExistingReservationByLicensePlate } from "@/lib/booking-utils"
+import { getLprPresenceState } from "@/lib/lpr-presence"
+import { normalizeLicensePlate } from "@/lib/utils"
+import { adminAuthorizedFetch } from "@/lib/admin-authorized-fetch"
+import { Clock, XCircle } from "lucide-react"
+import { OccupancyCounter } from "@/components/admin/occupancy-counter"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import { writeManualLprEvent } from "@/lib/manual-lpr-event"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
+
+interface Booking {
+  id: string // Firestore document ID
+  licensePlate: string
+  originalLicensePlate?: string
+  licensePlateUpdatedAt?: Timestamp
+  licensePlateUpdatedByEmail?: string | null
+  clientName?: string
+  clientEmail?: string
+  clientPhone?: string
+  clientTitle?: string
+  startDate: string // YYYY-MM-DD
+  startTime: string // HH:mm
+  endDate: string // YYYY-MM-DD
+  endTime: string // HH:mm
+  
+  // Date calculate
+  durationMinutes: number
+  multiparkDurationMinutes?: number // Minutele rotunjite trimise la Multipark API
+  days?: number
+  amount?: number
+  numberOfPersons?: number
+  
+  // Date pentru facturare (persoană juridică)
+  company?: string
+  companyVAT?: string // CUI/CIF
+  companyReg?: string // Număr Registrul Comerțului
+  companyAddress?: string
+  needInvoice?: boolean
+  orderNotes?: string
+  
+  // Date adresă personală
+  address?: string
+  city?: string
+  county?: string
+  postalCode?: string
+  
+  // Status și plată
+  status: "confirmed_test" | "confirmed_paid" | "cancelled_by_admin" | "cancelled_by_api" | "api_error" | "expired" | string
+  paymentStatus?: "paid" | "pending" | "refunded" | "n/a"
+  manualPaymentStatus?: "not_paid" | "partial" | "paid" | "refunded" // Pentru rezervările manuale
+  paymentIntentId?: string
+  
+  // Termeni și condiții
+  termsAccepted?: boolean
+  termsAcceptedAt?: Timestamp
+  
+  // Date API externe
+  apiBookingNumber?: string // Numărul de la API-ul de parcare
+  apiSuccess?: boolean
+  apiErrorCode?: string
+  apiMessage?: string
+  apiRequestPayload?: string
+  apiResponseRaw?: string
+  apiRequestTimestamp?: Timestamp
+  
+  // Metadata sistem
+  source?: "webhook" | "test_mode" | "manual" | "pay_on_site" | "lpr"
+  bookingOrigin?: string
+  userId?: string
+  paymentProvider?: "stripe" | "netopia"
+  channel?: "mobile"
+  activeModificationRequestId?: string | null
+  activeModificationRequest?: {
+    id?: string
+    status?: string
+    currentAmount?: number
+    newAmount?: number
+    amountToPay?: number
+    creditAmount?: number
+    difference?: number
+    paymentPolicy?: string | null
+    payOnSiteLocalOnly?: boolean
+    refundRequiredAmount?: number
+    modificationEmailStatus?: string | null
+    modificationEmailError?: string | null
+    modificationEmailMessageId?: string | null
+    finalValues?: {
+      startDate?: string
+      startTime?: string
+      endDate?: string
+      endTime?: string
+      licensePlate?: string
+    }
+  } | null
+  lastModificationRequestId?: string | null
+  lastPriceDifference?: number
+  lastMultiparkUpdateStatus?: string
+  modificationEmailStatus?: string | null
+  modificationEmailSentAt?: Timestamp
+  modificationEmailError?: string | null
+  modificationEmailMessageId?: string | null
+  modificationHistory?: Array<{
+    requestId?: string
+    status?: string
+    reason?: string
+    paymentOrderId?: string | null
+    oldValues?: {
+      startDate?: string
+      startTime?: string
+      endDate?: string
+      endTime?: string
+      licensePlate?: string
+    }
+    newValues?: {
+      startDate?: string
+      startTime?: string
+      endDate?: string
+      endTime?: string
+      licensePlate?: string
+    }
+    oldApiBookingNumber?: string | null
+    newApiBookingNumber?: string | null
+    oldAmount?: number
+    newAmount?: number
+    difference?: number
+    creditAmount?: number
+    amountToPay?: number
+    paymentPolicy?: string | null
+    payOnSiteLocalOnly?: boolean
+    modificationEmailStatus?: string | null
+    modificationEmailSentAtIso?: string | null
+    modificationEmailError?: string | null
+    modificationEmailMessageId?: string | null
+    modificationEmailQrIncluded?: boolean | null
+    atIso?: string
+  }>
+  createdAt: Timestamp // Firestore Timestamp
+  lastUpdated?: Timestamp
+  expiredAt?: Timestamp // Când a fost marcată ca expirată
+  
+  // Status email
+  emailStatus?: "sent" | "failed"
+  emailSentAt?: Timestamp
+  lastManualEmailSent?: Timestamp
+  manualEmailCount?: number
+  lastEmailError?: string
+  payOnSiteStatus?: "pending" | "paid" | "cancelled" // Adaugă status special pentru pay-on-site
+  payOnSiteAutoCancelled?: boolean
+  oblio?: {
+    status?: "pending" | "success" | "failed" | string
+    attempts?: number
+    lastAttemptAt?: Timestamp
+    lastSuccessAt?: Timestamp
+    lastFailureAt?: Timestamp
+    lastError?: string | null
+    invoiceNumber?: string
+    invoiceUrl?: string
+    lastSource?: "auto" | "manual" | string
+  }
+}
+
+type OblioOpsAlert = {
+  status?: string
+  openedAt?: Timestamp
+  resolvedAt?: Timestamp
+  lastEventAt?: Timestamp
+  windowMinutes?: number
+  threshold?: number
+  lastCountInWindow?: number
+  lastErrorKind?: string
+  lastErrorSample?: string
+}
+
+type PriceEntry = {
+  days: number
+  standardPrice: number
+  discountedPrice?: number
+}
+
+function parseDateTime(date?: string, time?: string) {
+  if (!date || !time) return null
+  const t = time.length === 5 ? `${time}:00` : time
+  const asIso = `${date}T${t}`
+  const d = new Date(asIso)
+  return Number.isNaN(d.getTime()) ? null : d
+}
+
+function demoDateRange(): DateRange {
+  const from = new Date()
+  from.setDate(from.getDate() - 200)
+  return { from, to: new Date() }
+}
+
+function BookingsPageContent() {
+  const { toast } = useToast()
+  const { user, loading: authLoading, isAdmin } = useAuth()
+
+  const formatInputDate = (d?: Date) => (d ? formatDateFn(d, "yyyy-MM-dd") : "")
+
+  const [bookings, setBookings] = useState<Booking[]>([])
+  const [filteredBookings, setFilteredBookings] = useState<Booking[]>([])
+  const [searchTerm, setSearchTerm] = useState("")
+  const [statusFilter, setStatusFilter] = useState("all")
+  const [dateRange, setDateRange] = useState<DateRange>(demoDateRange)
+  const [selectedBooking, setSelectedBooking] = useState<Booking | null>(null)
+  const [isViewDialogOpen, setIsViewDialogOpen] = useState(false)
+  const [isLoading, setIsLoading] = useState(true)
+  const [isRecovering, setIsRecovering] = useState(false)
+  const [isCleaningUp, setIsCleaningUp] = useState(false)
+  const [isSendingEmail, setIsSendingEmail] = useState(false)
+  const [sendingEmailBookingId, setSendingEmailBookingId] = useState<string | null>(null)
+  const [markingExitId, setMarkingExitId] = useState<string | null>(null)
+  const [isMarkExitDialogOpen, setIsMarkExitDialogOpen] = useState(false)
+  const [bookingToMarkExit, setBookingToMarkExit] = useState<Booking | null>(null)
+  const [recalculatingOcc, setRecalculatingOcc] = useState(false)
+  const [priceTable, setPriceTable] = useState<PriceEntry[]>([])
+  const [pricesLoading, setPricesLoading] = useState(false)
+  const [showCalcExplanation, setShowCalcExplanation] = useState(false)
+  const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false)
+  const [isDeleting, setIsDeleting] = useState(false)
+  const [bookingToDelete, setBookingToDelete] = useState<Booking | null>(null)
+  const [isCancelDialogOpen, setIsCancelDialogOpen] = useState(false)
+  const [isCancellingLocalBooking, setIsCancellingLocalBooking] = useState(false)
+  const [bookingToCancel, setBookingToCancel] = useState<Booking | null>(null)
+  const [cancelReasonInput, setCancelReasonInput] = useState("")
+
+  const [isEditPlateDialogOpen, setIsEditPlateDialogOpen] = useState(false)
+  const [bookingToEditPlate, setBookingToEditPlate] = useState<Booking | null>(null)
+  const [newPlateInput, setNewPlateInput] = useState("")
+  const [savingPlate, setSavingPlate] = useState(false)
+
+  // Manual LPR event (admin fallback): write as if it came from LPR API (lpr_events + gateEvents + booking lpr.*)
+  const [isManualLprDialogOpen, setIsManualLprDialogOpen] = useState(false)
+  const [modificationActionLoading, setModificationActionLoading] = useState<string | null>(null)
+  const [manualLprBooking, setManualLprBooking] = useState<Booking | null>(null)
+  const [manualLprEventType, setManualLprEventType] = useState<"entry" | "exit">("entry")
+  const [manualLprDate, setManualLprDate] = useState(() => formatInputDate(new Date()))
+  const [manualLprTime, setManualLprTime] = useState(() => new Date().toTimeString().slice(0, 5))
+  const [manualLprConfirmOverwrite, setManualLprConfirmOverwrite] = useState(false)
+  const [savingManualLpr, setSavingManualLpr] = useState(false)
+
+  const handleDateInputChange = (key: "from" | "to") => (value: string) => {
+    const parsed = value ? new Date(`${value}T00:00:00`) : undefined
+    setDateRange((prev) => ({ ...prev, [key]: parsed }))
+  }
+  
+  // State pentru actualizarea statusului de plată manual
+  const [isUpdatingPayment, setIsUpdatingPayment] = useState(false)
+  const [updatingPaymentBookingId, setUpdatingPaymentBookingId] = useState<string | null>(null)
+  
+  // State pentru anularea rezervărilor pay-on-site
+  const [isCancellingPayOnSite, setIsCancellingPayOnSite] = useState(false)
+  const [cancellingPayOnSiteBookingId, setCancellingPayOnSiteBookingId] = useState<string | null>(null)
+  
+  // State pentru adăugarea manuală de rezervări
+  const [isManualDialogOpen, setIsManualDialogOpen] = useState(false)
+  const [isCreatingManual, setIsCreatingManual] = useState(false)
+  const [manualLicensePlate, setManualLicensePlate] = useState("")
+  const [manualStartDate, setManualStartDate] = useState<Date | undefined>(new Date())
+  const [manualStartTime, setManualStartTime] = useState("08:30")
+  const [manualEndDate, setManualEndDate] = useState<Date | undefined>(new Date())
+  const [manualEndTime, setManualEndTime] = useState("18:30")
+  const [manualClientName, setManualClientName] = useState("")
+  const [manualClientPhone, setManualClientPhone] = useState("")
+  const [manualClientEmail, setManualClientEmail] = useState("")
+  const [manualNumberOfPersons, setManualNumberOfPersons] = useState("1")
+  const [manualPaymentStatusInput, setManualPaymentStatusInput] = useState<"not_paid" | "paid">("not_paid")
+  const [manualIsInside, setManualIsInside] = useState(true)
+  const [manualDuplicateError, setManualDuplicateError] = useState<string | null>(null)
+  
+  // State pentru logul vizual al răspunsului API multipark
+  const [apiLogData, setApiLogData] = useState<{
+    isVisible: boolean
+    request?: {
+      url: string
+      payload: string
+      timestamp: string
+    }
+    response?: {
+      status: number
+      body: string
+      success: boolean
+      errorCode?: string
+      message?: string
+      timestamp: string
+    }
+  }>({ isVisible: false })
+
+  // State pentru dialogul de email după rezervare manuală
+  const [isEmailDialogOpen, setIsEmailDialogOpen] = useState(false)
+  const [newBookingForEmail, setNewBookingForEmail] = useState<{
+    bookingId: string
+    apiBookingNumber: string
+    clientEmail: string
+    clientName: string
+    licensePlate: string
+  } | null>(null)
+
+  // State pentru dialogul de recovery success
+  const [isRecoverySuccessDialogOpen, setIsRecoverySuccessDialogOpen] = useState(false)
+  const [recoverySuccessData, setRecoverySuccessData] = useState<{
+    bookingNumber: string
+    licensePlate: string
+    clientName: string
+    apiMessage: string
+    originalErrorCode?: string
+    originalError?: string
+  } | null>(null)
+
+  // State pentru completarea rezervărilor unmatched_lpr din LPR
+  const [isLprCompleteDialogOpen, setIsLprCompleteDialogOpen] = useState(false)
+  const [lprBookingToComplete, setLprBookingToComplete] = useState<Booking | null>(null)
+  const [lprExitDate, setLprExitDate] = useState<Date | undefined>(new Date())
+  const [lprExitTime, setLprExitTime] = useState("12:00")
+  const [lprClientName, setLprClientName] = useState("")
+  const [lprClientPhone, setLprClientPhone] = useState("")
+  const [lprClientEmail, setLprClientEmail] = useState("")
+  const [lprPersons, setLprPersons] = useState("1")
+
+  // Paginare pentru tabelul de rezervări
+  const [currentPage, setCurrentPage] = useState(1)
+  const [pageSize, setPageSize] = useState(25)
+  const [globalSearchPage, setGlobalSearchPage] = useState(1)
+  const isSelectedBookingMobileApp =
+    selectedBooking?.bookingOrigin === "mobile-app" || selectedBooking?.channel === "mobile"
+
+  // Căutare globală (după număr / API / id / client / email),
+  // independentă de intervalul "Creată la".
+  // Două canale:
+  //  (1) prefix direct în Firestore (instant)
+  //  (2) index local "subțire" cu toate placutele (substring oriunde)
+  type PlateIndexEntry = {
+    id: string
+    plate: string // normalizat (uppercase, fără separatori)
+    api?: string // lowercase
+    client?: string // lowercase
+    email?: string // lowercase
+    createdAt?: number // millis, pentru sort
+  }
+  const [globalSearchResults, setGlobalSearchResults] = useState<Booking[]>([])
+  const [globalSearchLoading, setGlobalSearchLoading] = useState(false)
+  const [plateIndex, setPlateIndex] = useState<PlateIndexEntry[]>([])
+  const [plateIndexLoading, setPlateIndexLoading] = useState(false)
+  const [plateIndexLoadedAt, setPlateIndexLoadedAt] = useState<number | null>(null)
+  const globalSearchReqIdRef = useRef(0)
+
+  // Prag anulare „Plată la Parcare” (minute) – din config/reservationSettings
+  const [payOnSiteCancelMinutes, setPayOnSiteCancelMinutes] = useState<number>(180)
+  const [retryingOblioBookingId, setRetryingOblioBookingId] = useState<string | null>(null)
+  const [oblioOpsAlert, setOblioOpsAlert] = useState<OblioOpsAlert | null>(null)
+
+  useEffect(() => {
+    const unsub = onSnapshot(
+      doc(db, "config", "reservationSettings"),
+      (snap) => {
+        const v = Number((snap.data() as any)?.payOnSiteAutoCancelMinutes ?? 180)
+        setPayOnSiteCancelMinutes(Number.isFinite(v) && v > 0 ? v : 180)
+      },
+      (err) => console.error("Error listening to reservationSettings (payOnSiteAutoCancelMinutes)", err),
+    )
+    return () => unsub()
+  }, [])
+
+  useEffect(() => {
+    const unsub = onSnapshot(
+      doc(db, "ops_alerts", "oblio"),
+      (snap) => {
+        if (!snap.exists()) {
+          setOblioOpsAlert(null)
+          return
+        }
+
+        const data = snap.data() as OblioOpsAlert
+        if (String(data?.status || "") === "open") {
+          setOblioOpsAlert(data)
+          return
+        }
+
+        setOblioOpsAlert(null)
+      },
+      (err) => console.error("Error listening to ops_alerts/oblio", err),
+    )
+    return () => unsub()
+  }, [])
+
+  // Helper pentru formatarea întârzierilor (X ore Y minute / doar minute)
+  const formatDelay = (minutes: number) => {
+    const abs = Math.abs(minutes)
+    if (abs < 60) return `${abs} min`
+    const h = Math.floor(abs / 60)
+    const m = abs % 60
+    if (m === 0) return `${h} h`
+    return `${h} h ${m} min`
+  }
+
+  // Helper pentru afișarea orelor LPR.
+  // Camera trimite ora locală, dar serverul (UTC) o salvează ca și cum ar fi UTC,
+  // deci în UI afișăm în timezone UTC ca să vedem exact ora raportată de cameră.
+  const formatLprDateTime = (value: any) => {
+    if (!value) return "-"
+    const d =
+      typeof value?.toDate === "function"
+        ? value.toDate()
+        : typeof value === "string" || typeof value === "number"
+          ? new Date(value)
+          : new Date(String(value))
+    if (Number.isNaN(d.getTime())) return "-"
+    return d.toLocaleString("ro-RO", {
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      timeZone: "UTC",
+    })
+  }
+
+  const toManualLprIsoZ = (date: string, time: string): string | null => {
+    const d = String(date || "").trim()
+    const t = String(time || "").trim()
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return null
+    if (!/^\d{2}:\d{2}$/.test(t)) return null
+    const iso = `${d}T${t}:00Z`
+    const parsed = new Date(iso)
+    return Number.isNaN(parsed.getTime()) ? null : iso
+  }
+
+  const openManualLprDialog = (booking: Booking) => {
+    const lpr: any = (booking as any).lpr || {}
+    const defaultType: "entry" | "exit" = lpr?.isInside === true ? "exit" : "entry"
+    setManualLprBooking(booking)
+    setManualLprEventType(defaultType)
+    setManualLprDate(formatInputDate(new Date()))
+    setManualLprTime(new Date().toTimeString().slice(0, 5))
+    setManualLprConfirmOverwrite(false)
+    setIsManualLprDialogOpen(true)
+  }
+
+  const parseFirestoreDate = (value: any): Date | null => {
+    if (!value) return null
+    try {
+      if (typeof value?.toDate === "function") {
+        const d = value.toDate()
+        return Number.isNaN(d.getTime()) ? null : d
+      }
+      const d = new Date(value)
+      return Number.isNaN(d.getTime()) ? null : d
+    } catch {
+      return null
+    }
+  }
+
+  const formatDateKey = (d: Date) => formatDateFn(d, "yyyy-MM-dd")
+  const isoDayRange = (d: Date) => {
+    const start = startOfDay(d).toISOString()
+    const end = endOfDay(d).toISOString()
+    return { start, end }
+  }
+
+  const saveManualLprEvent = async () => {
+    if (!isAdmin) {
+      toast({
+        title: "Acces restricționat",
+        description: "Doar administratorii pot seta manual evenimente LPR.",
+        variant: "destructive",
+      })
+      return
+    }
+    if (!manualLprBooking?.id) return
+
+    const lpr: any = (manualLprBooking as any).lpr || {}
+    const relevantExisting = manualLprEventType === "entry" ? lpr?.arrivedAt : lpr?.departedAt
+    if (relevantExisting && !manualLprConfirmOverwrite) {
+      toast({
+        title: "Confirmare necesară",
+        description: "Există deja un timp LPR. Bifează confirmarea pentru suprascriere.",
+        variant: "destructive",
+      })
+      return
+    }
+
+    const isoZ = toManualLprIsoZ(manualLprDate, manualLprTime)
+    if (!isoZ) {
+      toast({
+        title: "Dată/Oră invalidă",
+        description: "Verifică data și ora (ex: 2025-12-24 și 14:30).",
+        variant: "destructive",
+      })
+      return
+    }
+
+    try {
+      setSavingManualLpr(true)
+      await writeManualLprEvent({
+        bookingId: manualLprBooking.id,
+        plateNumber: manualLprBooking.licensePlate || "",
+        eventType: manualLprEventType,
+        eventTimeIsoZ: isoZ,
+        adminUid: user?.uid ?? null,
+        adminEmail: user?.email ?? null,
+      })
+      toast({
+        title: "Salvat",
+        description: manualLprEventType === "entry" ? "Intrarea LPR a fost setată manual." : "Ieșirea LPR a fost setată manual.",
+      })
+      setIsManualLprDialogOpen(false)
+      setManualLprBooking(null)
+      await fetchBookings()
+    } catch (e: any) {
+      console.error("Manual LPR save failed", e)
+      toast({
+        title: "Eroare la salvare",
+        description: e?.message ? String(e.message) : "Nu s-a putut salva evenimentul LPR manual.",
+        variant: "destructive",
+      })
+    } finally {
+      setSavingManualLpr(false)
+    }
+  }
+
+  const loadPrices = useCallback(async () => {
+    setPricesLoading(true)
+    try {
+      const q = query(collection(db, "prices"), orderBy("days"))
+      const snap = await getDocs(q)
+      const items: PriceEntry[] = snap.docs
+        .map((d) => {
+          const data: any = d.data()
+          const standardPrice = Number(data.standardPrice || 0)
+          const reducereAplicata = data.reducereAplicata !== undefined ? Number(data.reducereAplicata) : undefined
+          const discountedFromReduction =
+            standardPrice > 0 && typeof reducereAplicata === "number" && !Number.isNaN(reducereAplicata)
+              ? Math.max(0, standardPrice - reducereAplicata)
+              : undefined
+          const discountedFromField = data.discountedPrice ? Number(data.discountedPrice) : undefined
+          return {
+            days: Number(data.days || 0),
+            standardPrice,
+            // Prefer "Preț Final (RON)" (discounted) if available; otherwise derive it from reducereAplicata.
+            discountedPrice:
+              typeof discountedFromField === "number" && !Number.isNaN(discountedFromField) && discountedFromField > 0
+                ? discountedFromField
+                : typeof discountedFromReduction === "number" && discountedFromReduction > 0
+                  ? discountedFromReduction
+                  : undefined,
+          }
+        })
+        .filter((p) => p.days > 0 && p.standardPrice > 0)
+      setPriceTable(items)
+    } catch (e) {
+      console.error("Error loading prices in bookings page", e)
+      setPriceTable([])
+    } finally {
+      setPricesLoading(false)
+    }
+  }, [])
+
+  // Shared Firestore pagination helper used on Bookings page.
+  // IMPORTANT: this intentionally has NO hard cap on total docs.
+  // We iterate all pages to keep counts and totals correct on large intervals.
+  const fetchAllQueryPages = useCallback(
+    async (
+      buildQuery: (cursor: any | null) => any,
+      pageSize: number,
+    ) => {
+      const docs: any[] = []
+      let cursor: any = null
+      while (true) {
+        const qPage = buildQuery(cursor)
+        const snap = await getDocs(qPage)
+        if (snap.empty) break
+        docs.push(...snap.docs)
+        if (snap.size < pageSize) break
+        cursor = snap.docs[snap.docs.length - 1]
+      }
+      return docs
+    },
+    [],
+  )
+
+  const fetchBookings = useCallback(
+    async (range?: DateRange) => {
+      setIsLoading(true)
+      try {
+        const today = new Date()
+        const defaultFrom = today
+        const fromDate = range?.from ?? dateRange.from ?? defaultFrom
+        const toDate = range?.to ?? dateRange.to ?? today
+
+        const bookingsCollectionRef = collection(db, "bookings")
+
+        // IMPORTANT: On this page, the date interval filters by "Creată la" (createdAt), not by booking period.
+        // We include all bookings whose createdAt is within the selected [from..to] (whole days).
+        const fromTs = Timestamp.fromDate(startOfDay(fromDate))
+        const toTs = Timestamp.fromDate(endOfDay(toDate))
+        const now = new Date()
+        const nowTs = now.getTime()
+
+        const combinedDocsMap = new Map<string, any>()
+        const pushDocSnap = (docSnap: any) => {
+          if (!docSnap) return
+          combinedDocsMap.set(docSnap.id, { id: docSnap.id, ...docSnap.data() })
+        }
+
+        const FETCH_PAGE_SIZE = 500
+        const createdAtDocs = await fetchAllQueryPages(
+          (cursor) =>
+            cursor
+              ? query(
+                  bookingsCollectionRef,
+                  where("createdAt", ">=", fromTs),
+                  where("createdAt", "<=", toTs),
+                  orderBy("createdAt", "desc"),
+                  startAfter(cursor),
+                  limit(FETCH_PAGE_SIZE),
+                )
+              : query(
+                  bookingsCollectionRef,
+                  where("createdAt", ">=", fromTs),
+                  where("createdAt", "<=", toTs),
+                  orderBy("createdAt", "desc"),
+                  limit(FETCH_PAGE_SIZE),
+                ),
+          FETCH_PAGE_SIZE,
+        )
+        createdAtDocs.forEach(pushDocSnap)
+
+        const combined = Array.from(combinedDocsMap.values())
+
+        const fetchedBookings: Booking[] = await Promise.all(
+          combined.map(async (raw: any) => {
+            // Completează start/end din LPR dacă lipsesc
+            const lpr: any = raw.lpr || {}
+            const normalizeDateKey = (val: any) => {
+              if (!val) return undefined
+              const d = typeof val?.toDate === "function" ? val.toDate() : new Date(val)
+              return isNaN(d.getTime()) ? undefined : formatDateFn(d, "yyyy-MM-dd")
+            }
+            const normalizeTimeKey = (val: any) => {
+              if (!val) return undefined
+              const d = typeof val?.toDate === "function" ? val.toDate() : new Date(val)
+              if (isNaN(d.getTime())) return undefined
+              // IMPORTANT: keep consistent with how admin UI treats LPR clock (UTC clock)
+              return d.toISOString().slice(11, 16)
+            }
+            const arrivedKey = normalizeDateKey(lpr.arrivedAt)
+            const departedKey = normalizeDateKey(lpr.departedAt)
+            const arrivedTimeKey = normalizeTimeKey(lpr.arrivedAt)
+            const departedTimeKey = normalizeTimeKey(lpr.departedAt)
+            if (!raw.startDate && arrivedKey) raw.startDate = arrivedKey
+            if (!raw.endDate && departedKey) raw.endDate = departedKey
+            if (!raw.startDate && raw.endDate) raw.startDate = raw.endDate
+            if (!raw.endDate && raw.startDate) raw.endDate = raw.startDate
+            // Also complete start/end time from LPR if missing (needed for correct day/value calculations)
+            if (!raw.startTime && arrivedTimeKey) raw.startTime = arrivedTimeKey
+            if (!raw.endTime && departedTimeKey) raw.endTime = departedTimeKey
+
+            // Calculează și marchează depășirea pragului pentru pay_on_site
+            // doar pentru no-show real (fără niciun semnal LPR).
+            try {
+              const isPayOnSite = raw.source === "pay_on_site" || (raw.status === "confirmed_pay_on_site" && raw.source !== "lpr")
+              const hasLprPresence =
+                Boolean(raw?.lpr?.arrivedAt) ||
+                Boolean(raw?.lpr?.departedAt) ||
+                raw?.lpr?.isInside === true
+
+              // Any LPR signal means the booking is no longer a no-show.
+              if (hasLprPresence) {
+                raw.payOnSiteOverdueMoreThan3h = false
+              }
+
+              if (isPayOnSite && !hasLprPresence && raw.startDate && raw.startTime && !raw.payOnSiteOverdueLocked) {
+                const plannedStart = new Date(`${raw.startDate}T${raw.startTime}:00`)
+                const diffMinutes = Math.floor((nowTs - plannedStart.getTime()) / (1000 * 60))
+                const overdueMoreThanThreshold = diffMinutes > payOnSiteCancelMinutes
+                raw.payOnSiteOverdueMinutes = diffMinutes
+                // Keep legacy field name for UI/back-compat, but it now means "over threshold"
+                raw.payOnSiteOverdueMoreThan3h = overdueMoreThanThreshold
+
+                // Persistăm în Firestore doar dacă este clar întârziată
+                if (overdueMoreThanThreshold) {
+                  try {
+                    await updateDoc(doc(db, "bookings", raw.id), {
+                      payOnSiteOverdueMinutes: diffMinutes,
+                      payOnSiteOverdueMoreThan3h: true,
+                      lastUpdated: serverTimestamp(),
+                    })
+                  } catch (e) {
+                    console.error("Error updating pay_on_site overdue flag:", e)
+                  }
+                }
+              }
+            } catch (e) {
+              console.error("Error computing overdue for pay_on_site booking:", e)
+            }
+
+            return raw as Booking
+          }),
+        )
+        // Sortează după createdAt (desc)
+        const sorted = [...fetchedBookings].sort((a, b) => {
+          const aCreated = (a.createdAt as any)?.toMillis?.() ?? 0
+          const bCreated = (b.createdAt as any)?.toMillis?.() ?? 0
+          return bCreated - aCreated
+        })
+        setBookings(sorted)
+        setFilteredBookings(sorted) // Inițial, afișează toate; filtrarea pe UI după interval
+      } catch (error) {
+        console.error("Error fetching bookings:", error)
+        toast({ title: "Eroare", description: "Nu s-au putut încărca rezervările.", variant: "destructive" })
+      } finally {
+        setIsLoading(false)
+      }
+    },
+    [dateRange.from, dateRange.to, toast, payOnSiteCancelMinutes, fetchAllQueryPages],
+  )
+
+  useEffect(() => {
+    if (!authLoading && user) {
+      ;(async () => {
+        await fetchBookings(dateRange)
+        await loadPrices()
+      })()
+    } else if (!authLoading && !user) {
+      setIsLoading(false)
+    }
+  }, [user, authLoading, fetchBookings, loadPrices, dateRange])
+
+  // ----------------------------------------------------------------
+  // Căutare globală: index local subțire + cache sessionStorage (TTL 5 min)
+  // ----------------------------------------------------------------
+  const PLATE_INDEX_CACHE_KEY = "bookings.plateIndex.v1"
+  const PLATE_INDEX_TTL_MS = 5 * 60 * 1000
+
+  const loadPlateIndex = useCallback(
+    async (opts?: { force?: boolean }) => {
+      const force = !!opts?.force
+      // 1) încearcă din sessionStorage dacă nu forțăm
+      if (!force && typeof window !== "undefined") {
+        try {
+          const raw = window.sessionStorage.getItem(PLATE_INDEX_CACHE_KEY)
+          if (raw) {
+            const parsed = JSON.parse(raw) as { savedAt: number; items: PlateIndexEntry[] }
+            if (parsed && Array.isArray(parsed.items) && parsed.savedAt) {
+              const age = Date.now() - parsed.savedAt
+              if (age < PLATE_INDEX_TTL_MS) {
+                setPlateIndex(parsed.items)
+                setPlateIndexLoadedAt(parsed.savedAt)
+                return
+              }
+            }
+          }
+        } catch (e) {
+          // ignore, refetch
+        }
+      }
+
+      setPlateIndexLoading(true)
+      try {
+        const bookingsCollectionRef = collection(db, "bookings")
+        const items: PlateIndexEntry[] = []
+        const INDEX_PAGE_SIZE = 500
+        // IMPORTANT: load full index (all pages), no hard cap, so global search
+        // is consistent with full-list fetch even on large history.
+        const indexDocs = await fetchAllQueryPages(
+          (cursor) =>
+            cursor
+              ? query(
+                  bookingsCollectionRef,
+                  orderBy("createdAt", "desc"),
+                  startAfter(cursor),
+                  limit(INDEX_PAGE_SIZE),
+                )
+              : query(
+                  bookingsCollectionRef,
+                  orderBy("createdAt", "desc"),
+                  limit(INDEX_PAGE_SIZE),
+                ),
+          INDEX_PAGE_SIZE,
+        )
+        indexDocs.forEach((d) => {
+          const raw: any = d.data()
+          const plate = normalizeLicensePlate(String(raw?.licensePlate || ""))
+          items.push({
+            id: d.id,
+            plate,
+            api: raw?.apiBookingNumber ? String(raw.apiBookingNumber).toLowerCase() : undefined,
+            client: raw?.clientName ? String(raw.clientName).toLowerCase() : undefined,
+            email: raw?.clientEmail ? String(raw.clientEmail).toLowerCase() : undefined,
+            createdAt:
+              typeof raw?.createdAt?.toMillis === "function"
+                ? raw.createdAt.toMillis()
+                : undefined,
+          })
+        })
+
+        setPlateIndex(items)
+        const savedAt = Date.now()
+        setPlateIndexLoadedAt(savedAt)
+        try {
+          if (typeof window !== "undefined") {
+            window.sessionStorage.setItem(
+              PLATE_INDEX_CACHE_KEY,
+              JSON.stringify({ savedAt, items }),
+            )
+          }
+        } catch (e) {
+          // quota exceeded etc. — ignorăm, indexul rămâne doar în memorie
+        }
+      } catch (e) {
+        console.error("Error loading plate index", e)
+      } finally {
+        setPlateIndexLoading(false)
+      }
+    },
+    [fetchAllQueryPages],
+  )
+
+  useEffect(() => {
+    if (!authLoading && user) {
+      void loadPlateIndex()
+    }
+  }, [authLoading, user, loadPlateIndex])
+
+  // Part 1 — prefix direct în Firestore pe licensePlate / apiBookingNumber
+  // IMPORTANT: no hard limit here; fetch all prefix matches for consistency.
+  // + fallback getDoc(id) când input-ul arată ca un ID Firestore.
+  const runFirestorePrefixSearch = useCallback(async (rawInput: string): Promise<Booking[]> => {
+    const q = rawInput.trim()
+    if (!q) return []
+
+    const plateQ = normalizeLicensePlate(q)
+    const apiLowerQ = q.toLowerCase()
+
+    const bookingsRef = collection(db, "bookings")
+    const results: Booking[] = []
+    const seen = new Set<string>()
+    const push = (id: string, data: any) => {
+      if (seen.has(id)) return
+      seen.add(id)
+      results.push({ id, ...data } as Booking)
+    }
+
+    const tasks: Promise<unknown>[] = []
+
+    if (plateQ.length >= 2) {
+      const qPlate = query(
+        bookingsRef,
+        where("licensePlate", ">=", plateQ),
+        where("licensePlate", "<=", plateQ + "\uf8ff"),
+        orderBy("licensePlate"),
+      )
+      tasks.push(
+        getDocs(qPlate)
+          .then((snap) => snap.forEach((d) => push(d.id, d.data())))
+          .catch((e) => console.warn("prefix plate search failed", e)),
+      )
+    }
+
+    if (apiLowerQ.length >= 2) {
+      const qApi = query(
+        bookingsRef,
+        where("apiBookingNumber", ">=", q),
+        where("apiBookingNumber", "<=", q + "\uf8ff"),
+        orderBy("apiBookingNumber"),
+      )
+      tasks.push(
+        getDocs(qApi)
+          .then((snap) => snap.forEach((d) => push(d.id, d.data())))
+          .catch(() => {
+            // index-ul compus poate lipsi la prima cerere; nu e blocant
+          }),
+      )
+    }
+
+    // Dacă input-ul poate fi un ID Firestore, încercăm fetch direct.
+    // ID-urile Firestore auto generate au ~20 caractere alfanumerice.
+    if (q.length >= 10) {
+      tasks.push(
+        getDoc(doc(db, "bookings", q))
+          .then((snap) => {
+            if (snap.exists()) push(snap.id, snap.data())
+          })
+          .catch(() => undefined),
+      )
+    }
+
+    await Promise.all(tasks)
+    return results
+  }, [])
+
+  // Part 2 — filtrare substring pe indexul local și hidratare batch a id-urilor găsite.
+  const runLocalIndexSearch = useCallback(
+    async (rawInput: string, indexSnapshot: PlateIndexEntry[]): Promise<Booking[]> => {
+      const q = rawInput.trim()
+      if (!q || indexSnapshot.length === 0) return []
+
+      const plateQ = normalizeLicensePlate(q)
+      const lowerQ = q.toLowerCase()
+
+      const candidates: string[] = []
+      for (const entry of indexSnapshot) {
+        const plateHit = plateQ.length >= 2 && entry.plate.includes(plateQ)
+        const apiHit = !plateHit && lowerQ.length >= 2 && entry.api && entry.api.includes(lowerQ)
+        const clientHit = !plateHit && !apiHit && lowerQ.length >= 2 && entry.client && entry.client.includes(lowerQ)
+        const emailHit =
+          !plateHit && !apiHit && !clientHit && lowerQ.length >= 2 && entry.email && entry.email.includes(lowerQ)
+        if (plateHit || apiHit || clientHit || emailHit) {
+          candidates.push(entry.id)
+        }
+      }
+
+      if (candidates.length === 0) return []
+
+      // hidratare în batch-uri de 10 (limita Firestore pentru where documentId IN)
+      const bookingsRef = collection(db, "bookings")
+      const hydrated: Booking[] = []
+      for (let i = 0; i < candidates.length; i += 10) {
+        const chunk = candidates.slice(i, i + 10)
+        try {
+          const qChunk = query(bookingsRef, where(documentId(), "in", chunk))
+          const snap = await getDocs(qChunk)
+          snap.forEach((d) => hydrated.push({ id: d.id, ...(d.data() as any) } as Booking))
+        } catch (e) {
+          console.warn("hydrate chunk failed", e)
+        }
+      }
+      return hydrated
+    },
+    [],
+  )
+
+  // Debounce + execuție paralelă Part 1 + Part 2, merge cu dedupe.
+  useEffect(() => {
+    const term = searchTerm.trim()
+    if (term.length < 2) {
+      setGlobalSearchResults([])
+      setGlobalSearchLoading(false)
+      setGlobalSearchPage(1)
+      return
+    }
+
+    const reqId = ++globalSearchReqIdRef.current
+    setGlobalSearchLoading(true)
+    const timer = setTimeout(async () => {
+      try {
+        const [fromFirestore, fromIndex] = await Promise.all([
+          runFirestorePrefixSearch(term),
+          runLocalIndexSearch(term, plateIndex),
+        ])
+        if (reqId !== globalSearchReqIdRef.current) return // request mai nou a luat locul
+
+        const merged = new Map<string, Booking>()
+        for (const b of fromFirestore) merged.set(b.id, b)
+        for (const b of fromIndex) if (!merged.has(b.id)) merged.set(b.id, b)
+
+        // sortare: după createdAt desc dacă există
+        const sorted = Array.from(merged.values()).sort((a, b) => {
+          const aMs = (a.createdAt as any)?.toMillis?.() ?? 0
+          const bMs = (b.createdAt as any)?.toMillis?.() ?? 0
+          return bMs - aMs
+        })
+        setGlobalSearchResults(sorted)
+        setGlobalSearchPage(1)
+      } finally {
+        if (reqId === globalSearchReqIdRef.current) {
+          setGlobalSearchLoading(false)
+        }
+      }
+    }, 250)
+
+    return () => clearTimeout(timer)
+  }, [searchTerm, plateIndex, runFirestorePrefixSearch, runLocalIndexSearch])
+
+  useEffect(() => {
+    let filtered = bookings
+    if (searchTerm) {
+      filtered = filtered.filter(
+        (b) =>
+          b.id.toLowerCase().includes(searchTerm.toLowerCase()) ||
+          (b.licensePlate && b.licensePlate.toLowerCase().includes(searchTerm.toLowerCase())) ||
+          (b.clientName && b.clientName.toLowerCase().includes(searchTerm.toLowerCase())) ||
+          (b.clientEmail && b.clientEmail.toLowerCase().includes(searchTerm.toLowerCase())) ||
+          (b.apiBookingNumber && b.apiBookingNumber.toLowerCase().includes(searchTerm.toLowerCase())),
+      )
+    }
+    if (statusFilter !== "all") {
+      if (statusFilter === "manual") {
+        // Filtrare specială pentru rezervările manuale
+        filtered = filtered.filter((b) => b.source === "manual")
+      } else if (statusFilter === "pay_on_site") {
+        // Filtrare specială pentru rezervările cu plată la parcare
+        filtered = filtered.filter((b) => isPayOnSiteBooking(b))
+      } else if (statusFilter === "occupied") {
+        // Ocupate = prezente (conform aceleiași reguli ca și contorul de Ocupare din tabel)
+        filtered = filtered.filter((b) => {
+          const lpr: any = (b as any)?.lpr || {}
+          if (getLprPresenceState({ lpr }).isEffectivelyInside) return true
+          if (lpr?.departedAt) return false
+          if (lpr?.arrivedAt && !lpr?.departedAt) return true
+          // Fără info LPR => considerăm prezent (încă nu avem ieșire confirmată)
+          return true
+        })
+      } else if (statusFilter === "exited") {
+        // Ieșite = restul (negarea regulii de "Ocupate")
+        filtered = filtered.filter((b) => {
+          const lpr: any = (b as any)?.lpr || {}
+          if (getLprPresenceState({ lpr }).isEffectivelyInside) return false
+          if (lpr?.departedAt) return true
+          if (lpr?.arrivedAt && !lpr?.departedAt) return false
+          return false
+        })
+      } else if (statusFilter === "online") {
+        // Online = badge ONLINE (non-manual, non-pay_on_site, non-LPR fără rezervare)
+        filtered = filtered.filter((b) => {
+          const isPayOnSite = isPayOnSiteBooking(b)
+          const isLprNoRes = isLprNoReservation(b)
+          return b.source !== "manual" && b.source !== "lpr" && !isPayOnSite && !isLprNoRes
+        })
+      } else if (statusFilter === "unmatched_lpr") {
+        // Match the LPR card definition: both unmatched placeholders and completed LPR-no-reservation rows.
+        filtered = filtered.filter((b) => isLprNoReservation(b))
+      } else if (statusFilter === "mobile_app") {
+        filtered = filtered.filter((b) => b.bookingOrigin === "mobile-app")
+      } else {
+        filtered = filtered.filter((b) => b.status === statusFilter)
+      }
+    }
+    if (dateRange.from || dateRange.to) {
+      const from = dateRange.from
+      const to = dateRange.to
+      // IMPORTANT: interval = "Creată la" (createdAt), not booking period.
+      filtered = filtered.filter((b) => createdAtInRange(b.createdAt, from, to))
+    }
+    setFilteredBookings(filtered)
+    // Resetăm pagina curentă când se schimbă filtrarea
+    setCurrentPage(1)
+  }, [bookings, searchTerm, statusFilter, dateRange])
+
+  // Interval filter helper: createdAt within [from..to] (whole days).
+  const createdAtInRange = (createdAt?: Timestamp, from?: Date, to?: Date) => {
+    if (!createdAt) return false
+    if (!from && !to) return true
+    try {
+      const created = createdAt.toDate()
+      const rangeStart = from ? startOfDay(from) : startOfDay(created)
+      const rangeEnd = to ? endOfDay(to) : endOfDay(created)
+      return created >= rangeStart && created <= rangeEnd
+    } catch {
+      return false
+    }
+  }
+
+  const computeDurationDays = (b: Booking): number => {
+    const startDate = (b.startDate || "").trim()
+    const endDate = (b.endDate || "").trim() || startDate
+    const startTime = (b.startTime || "").trim()
+    const endTime = (b.endTime || "").trim()
+
+    // Prefer exact start/end time
+    const startDt = startDate && startTime ? parseDateTime(startDate, startTime) : null
+    const endDt = endDate && endTime ? parseDateTime(endDate, endTime) : null
+    if (startDt && endDt && endDt.getTime() > startDt.getTime()) {
+      return Math.max(1, Math.ceil((endDt.getTime() - startDt.getTime()) / (24 * 60 * 60 * 1000)))
+    }
+
+    // Fallback: days calendaristice inclusive
+    try {
+      const s = parseISO(startDate)
+      const e = parseISO(endDate)
+      if (!Number.isNaN(s.getTime()) && !Number.isNaN(e.getTime())) {
+        return Math.max(1, differenceInCalendarDays(e, s) + 1)
+      }
+    } catch {}
+
+    return 1
+  }
+
+  const computePriceForDays = (days: number): number => {
+    if (!days || days <= 0) return 0
+    if (priceTable.length === 0) return 0
+    // IMPORTANT: for operational totals (and pay-on-site/LPR billing), we must use the exact tier price,
+    // not a prorated per-day value from a larger tier.
+    const sorted = [...priceTable].sort((a, b) => a.days - b.days)
+    const exact = sorted.find((p) => p.days === days)
+    const match = exact || sorted.find((p) => p.days >= days) || sorted[sorted.length - 1]
+    if (!match) return 0
+    const val = match.discountedPrice ?? match.standardPrice
+    return typeof val === "number" && Number.isFinite(val) ? val : 0
+  }
+
+  const computePerDayFromPrices = (days: number): number => {
+    if (!days || days <= 0) return 0
+    if (priceTable.length === 0) return 0
+    const sorted = [...priceTable].sort((a, b) => a.days - b.days)
+    const match = sorted.find((p) => p.days >= days) || sorted[sorted.length - 1]
+    if (!match) return 0
+    return (match.discountedPrice ?? match.standardPrice) / match.days
+  }
+
+  const computeOverlapDays = (b: Booking, from?: Date, to?: Date): number => {
+    if (!b.startDate) return 0
+    try {
+      const bookingStart = startOfDay(parseISO(b.startDate))
+      const bookingEnd = endOfDay(parseISO(b.endDate || b.startDate))
+      const rangeStart = from ? startOfDay(from) : bookingStart
+      const rangeEnd = to ? endOfDay(to) : bookingEnd
+
+      const startMs = Math.max(bookingStart.getTime(), rangeStart.getTime())
+      const endMs = Math.min(bookingEnd.getTime(), rangeEnd.getTime())
+      if (startMs > endMs) return 0
+      return Math.max(1, differenceInCalendarDays(new Date(endMs), new Date(startMs)) + 1)
+    } catch {
+      return 0
+    }
+  }
+
+  // Value per row (full booking value). Since the page interval is "Creată la", we don't pro-rate by booking period.
+  const computeBookingRowValue = (b: Booking): number => {
+    const amount = Number(b.amount || 0) || 0
+    if (amount > 0) return amount
+    const totalDays = computeDurationDays(b)
+    if (totalDays <= 0) return 0
+    const price = computePriceForDays(totalDays)
+    return price > 0 ? price : 0
+  }
+
+  // IMPORTANT: keep cards in sync with the table filters (tab + search + date range).
+  // filteredBookings is the full filtered dataset (before UI pagination), not a capped subset.
+  const statsBookings = filteredBookings
+
+  const isLostBooking = (b: Booking) => {
+    const s = String(b.status || "").toLowerCase()
+    return s === "expired" || s.includes("cancelled") || s.includes("anulat") || s.includes("api_error_cancel")
+  }
+
+  const activeBookingsForCards = statsBookings.filter((b) => !isLostBooking(b))
+  const totalCount = activeBookingsForCards.length
+
+  // IMPORTANT:
+  // - "Plată la parcare" is the payment channel (source=pay_on_site), not the origin.
+  // - LPR-originated bookings (source=lpr) must remain LPR everywhere, even if status is "confirmed_pay_on_site".
+  const isPayOnSiteBooking = (b: Booking) =>
+    b.source === "pay_on_site" || (String(b.status || "") === "confirmed_pay_on_site" && b.source !== "lpr")
+
+  const isPayOnSiteOverThreshold = (b: Booking) => {
+    if (!isPayOnSiteBooking(b)) return false
+    const lpr: any = (b as any)?.lpr || {}
+    const hasLprPresence = Boolean(lpr.arrivedAt) || Boolean(lpr.departedAt) || lpr.isInside === true
+    if (hasLprPresence) return false
+    const s = String(b.status || "").toLowerCase()
+    return Boolean((b as any).payOnSiteOverdueMoreThan3h) || s.includes("cancelled_pay_on_site_timeout")
+  }
+
+  const isOnlineBooking = (b: Booking) => {
+    // Match the table "ONLINE" badge meaning: non-manual, non-pay_on_site, non-LPR-without-reservation
+    if (b.source === "manual") return false
+    if (b.source === "lpr") return false
+    if (isPayOnSiteBooking(b)) return false
+    if (isLprNoReservation(b)) return false
+    return true
+  }
+
+  const isOnlinePaidBooking = (b: Booking) => {
+    if (isPayOnSiteBooking(b)) return false
+    return b.paymentStatus === "paid" || String(b.status || "") === "confirmed_paid"
+  }
+
+  const isMobileAppBooking = (b: Booking) => b.bookingOrigin === "mobile-app" || b.channel === "mobile"
+
+  const renderBookingApiColumn = (booking: Booking) => {
+    const showManualBadge = booking.source === "manual"
+    const showLprBadge = booking.source === "lpr" || booking.status === "unmatched_lpr"
+    const showPayOnSiteBadge = isPayOnSiteBooking(booking)
+    const showOnlineBadge =
+      !showManualBadge &&
+      !showLprBadge &&
+      !showPayOnSiteBadge &&
+      booking.status !== "unmatched_lpr"
+    const hasChannelBadge =
+      showManualBadge || showLprBadge || showPayOnSiteBadge || showOnlineBadge
+
+    return (
+      <div className="flex flex-col gap-1">
+        {hasChannelBadge ? (
+          <div className="flex flex-wrap items-center gap-1">
+            {showManualBadge && (
+              <Badge variant="outline" className="text-orange-700 border-orange-400 bg-orange-100 text-xs">
+                MANUAL
+              </Badge>
+            )}
+            {showLprBadge && (
+              <Badge variant="outline" className="text-purple-700 border-purple-400 bg-purple-100 text-xs">
+                LPR
+              </Badge>
+            )}
+            {showOnlineBadge && (
+              <Badge variant="outline" className="text-green-700 border-green-400 bg-green-100 text-xs">
+                ONLINE
+              </Badge>
+            )}
+            {showPayOnSiteBadge && (
+              <Badge
+                variant="outline"
+                className={`text-xs ${
+                  isPayOnSiteOverThreshold(booking)
+                    ? "text-red-800 border-red-500 bg-red-100"
+                    : "text-orange-800 border-orange-500 bg-orange-200"
+                }`}
+              >
+                PLATĂ LA PARCARE
+              </Badge>
+            )}
+          </div>
+        ) : null}
+        {!isPayOnSiteBooking(booking) && (
+          <span>{booking.apiBookingNumber || booking.id.substring(0, 6)}</span>
+        )}
+        {isMobileAppBooking(booking) && (
+          <Badge className="w-fit self-start border-0 bg-[#3D2067] text-white text-xs hover:bg-[#3D2067]">
+            Mobile
+          </Badge>
+        )}
+      </div>
+    )
+  }
+
+  const canRetryOblioInvoice = (booking?: Booking | null) => {
+    if (!booking) return false
+    const source = String(booking.source || "")
+    const status = String(booking.status || "").toLowerCase()
+    return booking.paymentStatus === "paid" && (source === "webhook" || source === "test_mode") && !status.includes("cancelled")
+  }
+
+  const isManualPaidBooking = (b: Booking) => {
+    if (b.source !== "manual") return false
+    const m = String(b.manualPaymentStatus || "")
+    return m === "paid" || b.paymentStatus === "paid"
+  }
+
+  // "LPR fără rezervare" (for reporting/cards) must match what the table shows as LPR-only rows:
+  // - status="unmatched_lpr" placeholders
+  // - OR source="lpr" rows that don't have a Multipark API booking number (came from street/LPR).
+  const isLprNoReservation = (b: Booking) => b.status === "unmatched_lpr" || (b.source === "lpr" && !b.apiBookingNumber)
+  const isLprNoReservationCompleted = (b: Booking) => {
+    if (!isLprNoReservation(b)) return false
+    const lpr: any = (b as any)?.lpr || {}
+    // Some flows set endDate/endTime without setting lpr.departedAt; treat that as "completed" too.
+    return Boolean(lpr?.departedAt) || Boolean(b.endDate && b.endTime)
+  }
+  const isLprNoReservationOpen = (b: Booking) => isLprNoReservation(b) && !isLprNoReservationCompleted(b)
+
+  // Split (based on the filtered table = createdAt interval + other filters)
+  const onlineTotalCount = statsBookings.filter((b) => !isLostBooking(b) && isOnlineBooking(b)).length
+  const onlineReceivedCount = statsBookings.filter((b) => !isLostBooking(b) && isOnlinePaidBooking(b)).length
+  const onlineTotalValue = statsBookings
+    .filter((b) => !isLostBooking(b) && isOnlineBooking(b))
+    .reduce((s, b) => s + computeBookingRowValue(b), 0)
+  const onlineReceivedValue = statsBookings
+    .filter((b) => !isLostBooking(b) && isOnlinePaidBooking(b))
+    .reduce((s, b) => s + computeBookingRowValue(b), 0)
+  const onlineUnpaidCount = Math.max(0, onlineTotalCount - onlineReceivedCount)
+  const mobileAppCount = statsBookings.filter((b) => !isLostBooking(b) && isMobileAppBooking(b)).length
+  const mobileAppValue = statsBookings
+    .filter((b) => !isLostBooking(b) && isMobileAppBooking(b))
+    .reduce((s, b) => s + computeBookingRowValue(b), 0)
+
+  // Pay-on-site: show all in-table pay_on_site count (even those over threshold),
+  // and also how many are over threshold / auto-cancelled. Value remains computed for non-lost ones only.
+  const payOnSiteTotalCount = statsBookings.filter((b) => !isLostBooking(b) && isPayOnSiteBooking(b)).length
+  const payOnSiteOverThresholdCount = statsBookings.filter((b) => !isLostBooking(b) && isPayOnSiteOverThreshold(b)).length
+
+  const payOnSiteEstimatedCount = statsBookings.filter((b) => !isLostBooking(b) && isPayOnSiteBooking(b)).length
+  const payOnSiteEstimatedValue = statsBookings
+    .filter((b) => !isLostBooking(b) && isPayOnSiteBooking(b))
+    .reduce((s, b) => s + computeBookingRowValue(b), 0)
+  const payOnSiteTotalValue = statsBookings
+    .filter((b) => !isLostBooking(b) && isPayOnSiteBooking(b))
+    .reduce((s, b) => s + computeBookingRowValue(b), 0)
+
+  const manualPaidCount = statsBookings.filter((b) => !isLostBooking(b) && isManualPaidBooking(b)).length
+  const manualPaidValue = statsBookings
+    .filter((b) => !isLostBooking(b) && isManualPaidBooking(b))
+    .reduce((s, b) => s + computeBookingRowValue(b), 0)
+  const manualTotalCount = statsBookings.filter((b) => !isLostBooking(b) && b.source === "manual").length
+  const manualTotalValue = statsBookings
+    .filter((b) => !isLostBooking(b) && b.source === "manual")
+    .reduce((s, b) => s + computeBookingRowValue(b), 0)
+
+  const lprNoReservationCount = statsBookings.filter((b) => !isLostBooking(b) && isLprNoReservation(b)).length
+  const lprNoReservationCompletedCount = statsBookings.filter((b) => !isLostBooking(b) && isLprNoReservationCompleted(b)).length
+  const lprNoReservationCompletedValue = statsBookings
+    .filter((b) => !isLostBooking(b) && isLprNoReservationCompleted(b))
+    .reduce((s, b) => s + computeBookingRowValue(b), 0)
+  const lostCount = statsBookings.filter((b) => isLostBooking(b)).length
+  const billableCount = statsBookings.filter(
+    (b) =>
+      !isLostBooking(b) &&
+      !isLprNoReservation(b) &&
+      (isOnlinePaidBooking(b) || isPayOnSiteBooking(b) || isManualPaidBooking(b)),
+  ).length
+
+  // "Încasat/Estimare" (operațional)
+  const totalProRataValue = onlineReceivedValue + payOnSiteEstimatedValue + manualPaidValue
+  // "Valoare totală (potențială)" pentru toate rezervările din tabel (except LPR fără rezervare),
+  // inclusiv Plată la parcare auto-anulată, ca să fie "calculat pentru toate 36".
+  const totalPotentialValue = statsBookings
+    .filter((b) => !isLostBooking(b) && (!isLprNoReservation(b) || isLprNoReservationCompleted(b)))
+    .reduce((s, b) => s + computeBookingRowValue(b), 0)
+
+  const handleViewBooking = (booking: Booking) => {
+    setSelectedBooking(booking)
+    setIsViewDialogOpen(true)
+  }
+
+  const shouldCancelInMultipark = (booking?: Booking | null) =>
+    Boolean(booking?.apiBookingNumber) && booking?.source !== "pay_on_site"
+
+  const runModificationAction = async (
+    booking: Booking,
+    action: "approve" | "reject" | "retry",
+    body?: Record<string, unknown>,
+  ) => {
+    const requestId = booking.activeModificationRequestId || booking.activeModificationRequest?.id
+    if (!requestId) {
+      toast({
+        title: "Cerere lipsă",
+        description: "Rezervarea nu are o cerere de modificare activă.",
+        variant: "destructive",
+      })
+      return
+    }
+
+    setModificationActionLoading(`${action}:${requestId}`)
+    try {
+      const res = await adminAuthorizedFetch(`/api/admin/bookings/modification-requests/${requestId}/${action}`, user, {
+        method: "POST",
+        body: JSON.stringify(body || {}),
+      })
+      const json = await res.json().catch(() => null)
+      if (!res.ok) throw new Error(json?.error || `HTTP ${res.status}`)
+
+      const status = json?.status || (action === "reject" ? "rejected" : "completed")
+      toast({
+        title:
+          action === "approve"
+            ? "Cerere aprobată"
+            : action === "reject"
+              ? "Cerere respinsă"
+              : "Reîncercare finalizată",
+        description:
+          status === "awaiting_difference_payment"
+            ? "Clientul trebuie să plătească diferența înainte de aplicarea modificării."
+            : "Statusul cererii a fost actualizat.",
+      })
+
+      setSelectedBooking((prev) =>
+        prev && prev.id === booking.id
+          ? {
+              ...prev,
+              activeModificationRequest: prev.activeModificationRequest
+                ? { ...prev.activeModificationRequest, status }
+                : prev.activeModificationRequest,
+            }
+          : prev
+      )
+      fetchBookings()
+    } catch (e) {
+      toast({
+        title: "Eroare modificare",
+        description: e instanceof Error ? e.message : "Acțiunea nu a putut fi executată.",
+        variant: "destructive",
+      })
+    } finally {
+      setModificationActionLoading(null)
+    }
+  }
+
+  const handleMarkOutside = async (booking: Booking) => {
+    setMarkingExitId(booking.id)
+    try {
+      const bookingRef = doc(db, "bookings", booking.id)
+      const snap = await getDoc(bookingRef)
+      if (!snap.exists()) throw new Error("Booking not found")
+
+      const data: any = snap.data()
+      const wasInside = getLprPresenceState({ lpr: data?.lpr }).isEffectivelyInside
+      const occupancyIncrementedFlag = data?.occupancyIncremented === true
+      const occupancyDecrementedFlag = data?.occupancyDecremented === true
+      const shouldDecrement = wasInside && occupancyIncrementedFlag && !occupancyDecrementedFlag
+
+      await updateDoc(bookingRef, {
+        "lpr.isInside": false,
+        "lpr.departedAt": serverTimestamp(),
+        "lpr.lastEventType": "exit",
+        ...(shouldDecrement
+          ? {
+              occupancyDecremented: true,
+              occupancyDecrementedAt: serverTimestamp(),
+            }
+          : {}),
+        lastUpdated: serverTimestamp(),
+      })
+
+      // Manual -1 la contor (idempotent, doar dacă era inside și nu a fost deja decremented)
+      if (shouldDecrement) {
+        const occupancyDocRef = doc(db, "config", "parkingLive")
+        await setDoc(occupancyDocRef, { lastUpdated: serverTimestamp() }, { merge: true })
+        await updateDoc(occupancyDocRef, {
+          occupiedCount: increment(-1),
+          lastUpdated: serverTimestamp(),
+          lastChange: {
+            type: "exit_manual",
+            bookingId: booking.id,
+            plateNumber: data?.licensePlate || booking.licensePlate || "N/A",
+            at: new Date().toISOString(),
+          },
+        })
+      }
+      toast({
+        title: "Marcat ca ieșit",
+        description: shouldDecrement
+          ? `Booking ${booking.id} setat cu isInside=false și contorul a fost decrementat (-1).`
+          : `Booking ${booking.id} setat cu isInside=false (contorul nu a fost modificat — deja decrementat / never incremented).`,
+      })
+      fetchBookings()
+    } catch (e) {
+      console.error("Mark outside failed", e)
+      toast({
+        title: "Eroare",
+        description: "Nu am putut marca ieșirea.",
+        variant: "destructive",
+      })
+    } finally {
+      setMarkingExitId(null)
+    }
+  }
+
+  const handleRecalculateOccupancy = async () => {
+    setRecalculatingOcc(true)
+    try {
+      const res = await adminAuthorizedFetch("/api/admin/occupancy", user, {
+        method: "POST",
+        body: JSON.stringify({ action: "recalculate" }),
+      })
+      if (!res.ok) throw new Error(`Status ${res.status}`)
+      const json = await res.json().catch(() => null)
+      toast({
+        title: "Contor recalculat",
+        description: `occupiedCount a fost setat la ${json?.occupiedCount ?? "valoarea corectă"} (din lpr.isInside=true).`,
+      })
+    } catch (e) {
+      console.error("Recalculate occupancy failed", e)
+      toast({
+        title: "Eroare",
+        description: "Nu am putut recalcula contorul.",
+        variant: "destructive",
+      })
+    } finally {
+      setRecalculatingOcc(false)
+    }
+  }
+
+  const handleDeleteBooking = async () => {
+    if (!bookingToDelete) return
+    if (!isAdmin) {
+      toast({
+        title: "Acces restricționat",
+        description: "Doar administratorii pot șterge rezervări.",
+        variant: "destructive",
+      })
+      return
+    }
+    setIsDeleting(true)
+    try {
+      const res = await adminAuthorizedFetch("/api/admin/bookings/delete", user, {
+        method: "POST",
+        body: JSON.stringify({ bookingId: bookingToDelete.id }),
+      })
+      const json = await res.json().catch(() => null)
+      if (!res.ok) throw new Error(json?.error || `HTTP ${res.status}`)
+
+      toast({
+        title: "Rezervare ștearsă",
+        description: [
+          json?.multiparkCancelled
+            ? "Rezervarea a fost anulată în Multipark și ștearsă local."
+            : "Rezervarea a fost ștearsă.",
+          json?.decremented
+            ? "Contorul de ocupare a fost ajustat (-1)."
+            : null,
+        ]
+          .filter(Boolean)
+          .join(" "),
+      })
+      fetchBookings()
+      if (isViewDialogOpen && selectedBooking?.id === bookingToDelete.id) {
+        setIsViewDialogOpen(false)
+      }
+      setIsDeleteDialogOpen(false)
+      setBookingToDelete(null)
+    } catch (e) {
+      console.error("Delete booking failed", e)
+      toast({
+        title: "Eroare",
+        description: "Nu am putut șterge rezervarea.",
+        variant: "destructive",
+      })
+    } finally {
+      setIsDeleting(false)
+    }
+  }
+
+  const handleCancelBooking = async () => {
+    if (!isAdmin) {
+      toast({
+        title: "Acces restricționat",
+        description: "Doar administratorii pot anula rezervări din admin.",
+        variant: "destructive",
+      })
+      return
+    }
+    if (!bookingToCancel?.id) return
+    setIsCancellingLocalBooking(true)
+    try {
+      const booking = bookingToCancel
+      const bookingRef = doc(db, "bookings", booking.id)
+      const doApiCancel = shouldCancelInMultipark(booking)
+      let apiResult: { success: boolean; message?: string } | null = null
+
+      if (doApiCancel) {
+        const result = await cancelParkingApiBooking(booking.apiBookingNumber!)
+        if (!result.success) {
+          await updateDoc(bookingRef, {
+            status: "api_error_cancel",
+            apiMessage: result.message,
+            lastUpdated: serverTimestamp(),
+          })
+          toast({
+            title: "Eroare Anulare API",
+            description: result.message || "Nu s-a putut anula rezervarea la API-ul de parcare.",
+            variant: "destructive",
+          })
+          return
+        }
+        apiResult = result
+      }
+
+      const updates: Record<string, any> = {
+        status: "cancelled_by_admin",
+        cancelledAt: serverTimestamp(),
+        cancelReason: cancelReasonInput.trim() || "Anulat local din admin",
+        lastUpdated: serverTimestamp(),
+      }
+      if (apiResult?.message) {
+        updates.apiMessage = apiResult.message
+      }
+      if (isPayOnSiteBooking(booking)) {
+        updates.payOnSiteStatus = "cancelled"
+      }
+      await updateDoc(bookingRef, updates)
+
+      if (apiResult?.success) {
+        const statsDocRef = doc(db, "config", "reservationStats")
+        await updateDoc(statsDocRef, { activeBookingsCount: increment(-1) })
+      }
+
+      // Send cancellation confirmation email to client (if available)
+      if (booking.clientEmail) {
+        try {
+          const res = await adminAuthorizedFetch("/api/admin/bookings/send-cancel-confirmation", user, {
+            method: "POST",
+            body: JSON.stringify({
+              bookingId: booking.id,
+              reason: cancelReasonInput.trim() || undefined,
+            }),
+          })
+          const json = await res.json().catch(() => null)
+          if (!res.ok) {
+            throw new Error(json?.error || `HTTP ${res.status}`)
+          }
+          toast({
+            title: "Anulată",
+            description: doApiCancel
+              ? "Rezervarea a fost anulată în Multipark și local, iar emailul de confirmare a fost trimis clientului."
+              : "Rezervarea a fost anulată local, iar emailul de confirmare a fost trimis clientului.",
+          })
+        } catch (e) {
+          console.error("Cancel confirmation email failed", e)
+          toast({
+            title: "Anulată (email eșuat)",
+            description: doApiCancel
+              ? "Rezervarea a fost anulată în Multipark și local, dar emailul către client nu a putut fi trimis."
+              : "Rezervarea a fost anulată local, dar emailul către client nu a putut fi trimis.",
+            variant: "destructive",
+          })
+        }
+      } else {
+        toast({
+          title: "Anulată",
+          description: doApiCancel
+            ? "Rezervarea a fost anulată în Multipark și local. (Clientul nu are email în rezervare.)"
+            : "Rezervarea a fost anulată local. (Clientul nu are email în rezervare.)",
+        })
+      }
+
+      // Refresh UI
+      await fetchBookings()
+      if (selectedBooking?.id === booking.id) {
+        setSelectedBooking((prev) => (prev ? { ...prev, status: "cancelled_by_admin" } : prev))
+      }
+      setIsCancelDialogOpen(false)
+      setBookingToCancel(null)
+      setCancelReasonInput("")
+    } catch (e) {
+      console.error("Cancel booking failed", e)
+      toast({
+        title: "Eroare",
+        description: "Nu am putut anula rezervarea.",
+        variant: "destructive",
+      })
+    } finally {
+      setIsCancellingLocalBooking(false)
+    }
+  }
+
+  const handleSaveNewLicensePlate = async () => {
+    if (!bookingToEditPlate?.id) return
+    if (!user) return
+    const normalized = normalizeLicensePlate(newPlateInput || "").toUpperCase().trim()
+    if (!normalized) {
+      toast({
+        title: "Număr invalid",
+        description: "Completează un număr de înmatriculare valid.",
+        variant: "destructive",
+      })
+      return
+    }
+
+    const current = String(bookingToEditPlate.licensePlate || "").trim()
+    if (normalizeLicensePlate(current).toUpperCase().trim() === normalized) {
+      toast({
+        title: "Nicio schimbare",
+        description: "Numărul nou este identic cu cel curent.",
+      })
+      return
+    }
+
+    setSavingPlate(true)
+    try {
+      const updates: Record<string, any> = {
+        licensePlate: normalized,
+        licensePlateUpdatedAt: serverTimestamp(),
+        licensePlateUpdatedByEmail: user.email || null,
+        lastUpdated: serverTimestamp(),
+      }
+      if (!bookingToEditPlate.originalLicensePlate) {
+        updates.originalLicensePlate = bookingToEditPlate.licensePlate || ""
+      }
+      // Firebase-only update
+      await updateDoc(doc(db, "bookings", bookingToEditPlate.id), updates)
+
+      toast({
+        title: "Salvat",
+        description: `Nr. înmatriculare a fost schimbat în ${normalized}.`,
+      })
+
+      // Update local UI state
+      if (selectedBooking?.id === bookingToEditPlate.id) {
+        setSelectedBooking((prev) =>
+          prev
+            ? ({
+                ...prev,
+                licensePlate: normalized,
+                originalLicensePlate: prev.originalLicensePlate || bookingToEditPlate.licensePlate,
+              } as any)
+            : prev,
+        )
+      }
+
+      await fetchBookings()
+      setIsEditPlateDialogOpen(false)
+      setBookingToEditPlate(null)
+      setNewPlateInput("")
+    } catch (e) {
+      console.error("License plate update failed", e)
+      toast({
+        title: "Eroare",
+        description: "Nu am putut salva numărul de înmatriculare.",
+        variant: "destructive",
+      })
+    } finally {
+      setSavingPlate(false)
+    }
+  }
+
+  const handleCancelPayOnSiteBooking = async (booking: Booking) => {
+    if (!isPayOnSiteBooking(booking)) {
+      toast({
+        title: "Eroare",
+        description: "Această funcție este doar pentru rezervările cu plată la parcare.",
+        variant: "destructive",
+      })
+      return
+    }
+    
+    setIsCancellingPayOnSite(true)
+    setCancellingPayOnSiteBookingId(booking.id)
+    
+    try {
+      // Anularea se face doar în Firebase, nu prin API Multipark
+      const bookingDocRef = doc(db, "bookings", booking.id)
+      await updateDoc(bookingDocRef, {
+        status: "cancelled_by_admin",
+        payOnSiteStatus: "cancelled", // Adaugă status special pentru pay-on-site
+        cancelledAt: serverTimestamp(),
+        cancelledBy: "admin",
+        apiMessage: "Rezervare anulată de administrator (doar în sistemul local)",
+      })
+      
+      // Decrementez contorul de rezervări active
+      const statsDocRef = doc(db, "config", "reservationStats")
+      await updateDoc(statsDocRef, { activeBookingsCount: increment(-1) })
+      
+      toast({
+        title: "Rezervare Anulată",
+        description: `Rezervarea cu numărul ${booking.licensePlate} a fost anulată cu succes în sistemul local.`,
+      })
+      
+      fetchBookings() // Reîncarcă lista
+      if (isViewDialogOpen) setIsViewDialogOpen(false)
+      
+    } catch (error) {
+      console.error("Error cancelling pay-on-site booking:", error)
+      toast({
+        title: "Eroare Sistem",
+        description: "A apărut o eroare la procesul de anulare.",
+        variant: "destructive",
+      })
+    } finally {
+      setIsCancellingPayOnSite(false)
+      setCancellingPayOnSiteBookingId(null)
+    }
+  }
+
+  const handleRecoverBooking = async (booking: Booking) => {
+    if (booking.status !== "api_error" || booking.paymentStatus !== "paid") {
+      toast({
+        title: "Rezervarea nu poate fi recuperată",
+        description: "Doar rezervările cu plata procesată și API eșuat pot fi recuperate.",
+        variant: "destructive",
+      })
+      return
+    }
+
+    setIsRecovering(true)
+    try {
+      console.log(`🔄 Starting recovery for booking ${booking.id} (${booking.licensePlate})`)
+      console.log(`🔄 Original error: ${booking.apiMessage}`)
+      console.log(`🔄 Original error code: ${booking.apiErrorCode}`)
+      
+      const result = await recoverSpecificBooking(booking.id)
+      
+      if (result.success) {
+        console.log(`✅ Recovery successful! New booking number: ${result.bookingNumber}`)
+        
+        // Pregătește datele pentru dialogul de success
+        setRecoverySuccessData({
+          bookingNumber: result.bookingNumber!,
+          licensePlate: booking.licensePlate,
+          clientName: booking.clientName || 'Client',
+          apiMessage: "Rezervarea a fost creată cu succes în API multipark!",
+          originalErrorCode: booking.apiErrorCode,
+          originalError: booking.apiMessage
+        })
+        
+        // Afișează dialogul de success
+        setIsRecoverySuccessDialogOpen(true)
+        
+        // Reîncarcă lista
+        fetchBookings()
+        if (isViewDialogOpen) setIsViewDialogOpen(false)
+        
+      } else {
+        console.error(`❌ Recovery failed: ${result.message}`)
+        
+        toast({
+          title: "Recovery Eșuat",
+          description: result.message,
+          variant: "destructive",
+        })
+      }
+    } catch (error) {
+      console.error("Error recovering booking:", error)
+      toast({
+        title: "Eroare Recovery",
+        description: "A apărut o eroare la procesul de recovery.",
+        variant: "destructive",
+      })
+    } finally {
+      setIsRecovering(false)
+    }
+  }
+
+  const handleCleanupExpired = async () => {
+    setIsCleaningUp(true)
+    try {
+      // Folosește funcția soft cleanup care e mai eficientă
+      const { softCleanupExpiredBookings } = await import('@/lib/booking-utils')
+      const expiredCount = await softCleanupExpiredBookings()
+      
+      if (expiredCount > 0) {
+        toast({
+          title: "Cleanup Finalizat",
+          description: `Au fost marcate ${expiredCount} rezervări ca expirate și excluse din categoria activă.`,
+        })
+      } else {
+        toast({
+          title: "Cleanup Complet", 
+          description: "Nu au fost găsite rezervări expirate de curățat.",
+        })
+      }
+      
+      // Reîncarcă lista
+      fetchBookings()
+      
+    } catch (error) {
+      console.error('Error during cleanup:', error)
+      toast({
+        title: "Eroare Cleanup",
+        description: "A apărut o eroare la curățarea rezervărilor expirate.",
+        variant: "destructive",
+      })
+    } finally {
+      setIsCleaningUp(false)
+    }
+  }
+
+  const handleCreateManualBooking = async (e: React.FormEvent) => {
+    e.preventDefault()
+    const uiProcessId = `UI_MANUAL_${Date.now()}`
+    
+    console.log(`🖥️ [${uiProcessId}] ===== MANUAL BOOKING UI PROCESS STARTED =====`)
+    console.log(`🖥️ [${uiProcessId}] Timestamp: ${new Date().toISOString()}`)
+    
+    if (!user) {
+      console.error(`❌ [${uiProcessId}] User not authenticated`)
+      console.error(`❌ [${uiProcessId}] User object:`, user)
+      
+      toast({
+        title: "Acces Neautorizat",
+        description: "Trebuie să fiți autentificat pentru a adăuga rezervări.",
+        variant: "destructive",
+      })
+      return
+    }
+
+    console.log(`✅ [${uiProcessId}] User authenticated:`)
+    console.log(`✅ [${uiProcessId}]   User ID: ${user.uid}`)
+    console.log(`✅ [${uiProcessId}]   User Email: ${user.email}`)
+    console.log(`✅ [${uiProcessId}]   Is Admin: ${isAdmin}`)
+
+    setIsCreatingManual(true)
+
+    // VERIFICARE SUPRAPUNERE PERIOADA pentru același număr de înmatriculare
+    try {
+      console.log(`🔍 [${uiProcessId}] ===== CHECKING PERIOD OVERLAP =====`)
+      console.log(`🔍 [${uiProcessId}] Form data to validate:`)
+      console.log(`🔍 [${uiProcessId}]   License Plate: ${manualLicensePlate.toUpperCase()}`)
+      console.log(`🔍 [${uiProcessId}]   Start Date: ${manualStartDate ? formatDateFn(manualStartDate, "yyyy-MM-dd") : 'NOT SET'}`)
+      console.log(`🔍 [${uiProcessId}]   Start Time: ${manualStartTime}`)
+      console.log(`🔍 [${uiProcessId}]   End Date: ${manualEndDate ? formatDateFn(manualEndDate, "yyyy-MM-dd") : 'NOT SET'}`)
+      console.log(`🔍 [${uiProcessId}]   End Time: ${manualEndTime}`)
+      console.log(`🔍 [${uiProcessId}]   Client Name: ${manualClientName || 'N/A'}`)
+      console.log(`🔍 [${uiProcessId}]   Client Email: ${manualClientEmail || 'N/A'}`)
+      console.log(`🔍 [${uiProcessId}]   Client Phone: ${manualClientPhone || 'N/A'}`)
+      console.log(`🔍 [${uiProcessId}]   Number of Persons: ${manualNumberOfPersons}`)
+
+      const overlapCheckStartTime = Date.now()
+
+      const duplicateCheck = await checkExistingReservationByLicensePlate(
+        manualLicensePlate,
+        manualStartDate ? formatDateFn(manualStartDate, "yyyy-MM-dd") : '',
+        manualEndDate ? formatDateFn(manualEndDate, "yyyy-MM-dd") : '',
+        manualStartTime,
+        manualEndTime
+      )
+      
+      const overlapCheckDuration = Date.now() - overlapCheckStartTime
+      console.log(`🔍 [${uiProcessId}] Overlap check completed in ${overlapCheckDuration}ms`)
+      console.log(`🔍 [${uiProcessId}] Overlap result: ${duplicateCheck.exists ? 'CONFLICT FOUND' : 'NO CONFLICT'}`)
+      
+      if (duplicateCheck.exists && duplicateCheck.existingBooking) {
+        const existing = duplicateCheck.existingBooking
+        const existingPeriod = `${formatDateFn(new Date(existing.startDate), "d MMM yyyy", { locale: ro })} - ${formatDateFn(new Date(existing.endDate), "d MMM yyyy", { locale: ro })}`
+        const newPeriod = `${manualStartDate ? formatDateFn(manualStartDate, "d MMM yyyy", { locale: ro }) : ''} - ${manualEndDate ? formatDateFn(manualEndDate, "d MMM yyyy", { locale: ro }) : ''}`
+        
+        console.log(`⚠️ [${uiProcessId}] ===== PERIOD OVERLAP DETECTED =====`)
+        console.log(`⚠️ [${uiProcessId}] Existing booking details:`)
+        console.log(`⚠️ [${uiProcessId}]   ID: ${existing.id}`)
+        console.log(`⚠️ [${uiProcessId}]   Period: ${existing.startDate} ${existing.startTime} - ${existing.endDate} ${existing.endTime}`)
+        console.log(`⚠️ [${uiProcessId}]   Status: ${existing.status}`)
+        console.log(`⚠️ [${uiProcessId}]   Booking Number: ${existing.apiBookingNumber || 'N/A'}`)
+        console.log(`⚠️ [${uiProcessId}] New booking period: ${manualStartDate ? formatDateFn(manualStartDate, "yyyy-MM-dd") : ''} ${manualStartTime} - ${manualEndDate ? formatDateFn(manualEndDate, "yyyy-MM-dd") : ''} ${manualEndTime}`)
+
+        // Setează mesajul de eroare persistent pe formular
+        const errorMessage = `Perioada ${newPeriod} se suprapune cu rezervarea existentă pentru ${manualLicensePlate.toUpperCase()} din ${existingPeriod}${existing.apiBookingNumber ? ` (Rezervare #${existing.apiBookingNumber})` : ''}`
+        setManualDuplicateError(errorMessage)
+
+        console.log(`🚨 [${uiProcessId}] Blocking manual booking due to overlap`)
+        console.log(`🚨 [${uiProcessId}] Error message: ${errorMessage}`)
+
+        toast({
+          title: "Perioadă Suprapusă",
+          description: "Perioada selectată se suprapune cu o rezervare existentă pentru acest număr de înmatriculare.",
+          variant: "destructive",
+          duration: 5000,
+        })
+        
+        setIsCreatingManual(false)
+        return
+      } else {
+        console.log(`✅ [${uiProcessId}] No period overlap found - can proceed`)
+        // Golește mesajul de eroare dacă nu există suprapunere
+        setManualDuplicateError(null)
+      }
+      
+    } catch (error) {
+      console.error(`❌ [${uiProcessId}] ===== OVERLAP CHECK ERROR =====`)
+      console.error(`❌ [${uiProcessId}] Error Type: ${error instanceof Error ? error.constructor.name : typeof error}`)
+      console.error(`❌ [${uiProcessId}] Error Message: ${error instanceof Error ? error.message : String(error)}`)
+      console.error(`❌ [${uiProcessId}] Error Stack:`, error instanceof Error ? error.stack : 'N/A')
+      
+      // În caz de eroare, afișăm un warning dar permitem continuarea
+      toast({
+        title: "Avertisment",
+        description: "Nu s-a putut verifica dacă există suprapuneri cu rezervări existente. Dacă aveți deja o rezervare în această perioadă, vă rugăm să nu continuați.",
+        duration: 5000,
+      })
+    }
+
+    try {
+      console.log(`🏗️ [${uiProcessId}] ===== PREPARING FORM DATA =====`)
+      
+      const formData = new FormData()
+      formData.append('licensePlate', manualLicensePlate)
+      formData.append('startDate', manualStartDate ? formatDateFn(manualStartDate, "yyyy-MM-dd") : '')
+      formData.append('startTime', manualStartTime)
+      formData.append('endDate', manualEndDate ? formatDateFn(manualEndDate, "yyyy-MM-dd") : '')
+      formData.append('endTime', manualEndTime)
+      formData.append('clientName', manualClientName)
+      formData.append('clientPhone', manualClientPhone)
+      formData.append('clientEmail', manualClientEmail)
+      formData.append('numberOfPersons', manualNumberOfPersons)
+      formData.append('manualPaymentStatus', manualPaymentStatusInput)
+      formData.append('manualIsInside', manualIsInside ? 'true' : 'false')
+
+      console.log(`🏗️ [${uiProcessId}] FormData prepared with all fields`)
+      console.log(`🏗️ [${uiProcessId}] Calling createManualBooking server action...`)
+      
+      // Afișează logul de început API
+      setApiLogData({
+        isVisible: true,
+        request: undefined,
+        response: undefined
+      })
+      
+      const createStartTime = Date.now()
+      const result = await createManualBooking(formData)
+      const createDuration = Date.now() - createStartTime
+
+      console.log(`🏗️ [${uiProcessId}] Server action completed in ${createDuration}ms`)
+      console.log(`🏗️ [${uiProcessId}] Result success: ${result.success}`)
+      console.log(`🏗️ [${uiProcessId}] Result message: ${result.message}`)
+
+      // Actualizează logul cu detaliile API dacă sunt disponibile
+      if ((result as any).apiDetails) {
+        console.log(`📊 [${uiProcessId}] API Details available, updating visual log`)
+        setApiLogData({
+          isVisible: true,
+          request: (result as any).apiDetails.request,
+          response: (result as any).apiDetails.response
+        })
+      }
+
+      if (result.success) {
+        console.log(`✅ [${uiProcessId}] ===== MANUAL BOOKING CREATED SUCCESSFULLY =====`)
+        console.log(`✅ [${uiProcessId}] Booking ID: ${(result as any).bookingId || 'N/A'}`)
+        console.log(`✅ [${uiProcessId}] API Booking Number: ${(result as any).apiBookingNumber || 'N/A'}`)
+        console.log(`✅ [${uiProcessId}] Success message: ${result.message}`)
+
+        toast({
+          title: "Rezervare Adăugată",
+          description: result.message,
+        })
+
+        console.log(`🧹 [${uiProcessId}] Resetting form fields...`)
+
+        // Închide dialogul manual
+        setApiLogData({ isVisible: false })
+        setIsManualDialogOpen(false)
+
+        // Verifică dacă se poate trimite email
+        const hasEmail = manualClientEmail && manualClientEmail.trim() !== ''
+        const hasApiBookingNumber = (result as any).apiBookingNumber
+
+        if (hasEmail && hasApiBookingNumber) {
+          console.log(`📧 [${uiProcessId}] Email available, showing email dialog...`)
+          
+          // Pregătește datele pentru dialogul de email
+          setNewBookingForEmail({
+            bookingId: (result as any).bookingId,
+            apiBookingNumber: (result as any).apiBookingNumber,
+            clientEmail: manualClientEmail,
+            clientName: manualClientName || 'Client',
+            licensePlate: manualLicensePlate
+          })
+          
+          // Afișează dialogul de email
+          setIsEmailDialogOpen(true)
+        } else {
+          console.log(`📧 [${uiProcessId}] Email not available: hasEmail=${hasEmail}, hasApiBookingNumber=${hasApiBookingNumber}`)
+        }
+
+        // Resetează formularul
+        setManualLicensePlate("")
+        setManualStartDate(new Date())
+        setManualStartTime("08:30")
+        setManualEndDate(new Date())
+        setManualEndTime("18:30")
+        setManualClientName("")
+        setManualClientPhone("")
+        setManualClientEmail("")
+        setManualNumberOfPersons("1")
+        setManualPaymentStatusInput("not_paid")
+        setManualIsInside(true)
+        setManualDuplicateError(null)
+
+        console.log(`🔄 [${uiProcessId}] Refreshing bookings list...`)
+
+        // Reîncarcă lista
+        await fetchBookings()
+        
+        console.log(`🎉 [${uiProcessId}] Manual booking process completed successfully`)
+        console.log(`🎉 [${uiProcessId}] Total UI duration: ${Date.now() - (Date.now() - createDuration)}ms`)
+      } else {
+        console.error(`❌ [${uiProcessId}] ===== MANUAL BOOKING FAILED =====`)
+        console.error(`❌ [${uiProcessId}] Error message: ${result.message}`)
+        console.error(`❌ [${uiProcessId}] Server duration: ${createDuration}ms`)
+
+        toast({
+          title: "Eroare",
+          description: result.message,
+          variant: "destructive",
+        })
+      }
+    } catch (error) {
+      console.error(`❌ [${uiProcessId}] ===== UI CRITICAL ERROR =====`)
+      console.error(`❌ [${uiProcessId}] Error Type: ${error instanceof Error ? error.constructor.name : typeof error}`)
+      console.error(`❌ [${uiProcessId}] Error Message: ${error instanceof Error ? error.message : String(error)}`)
+      console.error(`❌ [${uiProcessId}] Error Stack:`, error instanceof Error ? error.stack : 'N/A')
+      console.error(`❌ [${uiProcessId}] Form state:`, {
+        licensePlate: manualLicensePlate,
+        startDate: manualStartDate ? formatDateFn(manualStartDate, "yyyy-MM-dd") : null,
+        startTime: manualStartTime,
+        endDate: manualEndDate ? formatDateFn(manualEndDate, "yyyy-MM-dd") : null,
+        endTime: manualEndTime,
+        clientName: manualClientName,
+        clientEmail: manualClientEmail
+      })
+      
+      toast({
+        title: "Eroare",
+        description: "A apărut o eroare la crearea rezervării.",
+        variant: "destructive",
+      })
+    } finally {
+      console.log(`🏁 [${uiProcessId}] UI process ended, resetting loading state`)
+      setIsCreatingManual(false)
+    }
+  }
+
+  const handleSendEmailFromNewBooking = async () => {
+    if (!newBookingForEmail) return
+
+    setIsSendingEmail(true)
+    setSendingEmailBookingId(newBookingForEmail.bookingId)
+    
+    try {
+      console.log(`📧 Sending email for new manual booking: ${newBookingForEmail.bookingId}`)
+      
+      const result = await sendManualBookingEmail(newBookingForEmail.bookingId)
+      
+      if (result.success) {
+        toast({
+          title: "Email trimis",
+          description: `Email-ul a fost trimis cu succes către ${newBookingForEmail.clientEmail}`,
+          variant: "default",
+        })
+        
+        console.log(`✅ Email sent successfully to ${newBookingForEmail.clientEmail}`)
+      } else {
+        toast({
+          title: "Eroare la trimiterea email-ului",
+          description: result.message,
+          variant: "destructive",
+        })
+        
+        console.error(`❌ Email failed: ${result.message}`)
+      }
+    } catch (error) {
+      console.error("Send email error:", error)
+      toast({ 
+        title: "Eroare", 
+        description: "Eroare la trimiterea email-ului. Încercați din nou.", 
+        variant: "destructive" 
+      })
+    } finally {
+      setIsSendingEmail(false)
+      setSendingEmailBookingId(null)
+      setIsEmailDialogOpen(false)
+      setNewBookingForEmail(null)
+      
+      // Refresh lista pentru a vedea statusul email-ului actualizat
+      await fetchBookings()
+    }
+  }
+
+  const handleSendEmail = async (booking: Booking) => {
+    if (!booking.clientEmail) {
+      toast({
+        title: "Eroare",
+        description: "Această rezervare nu are email-ul clientului.",
+        variant: "destructive",
+      })
+      return
+    }
+
+    if (!booking.apiBookingNumber) {
+      toast({
+        title: "Eroare", 
+        description: "Această rezervare nu are număr de la API-ul de parcare și nu se poate genera QR code.",
+        variant: "destructive",
+      })
+      return
+    }
+
+    setIsSendingEmail(true)
+    setSendingEmailBookingId(booking.id)
+    
+    try {
+      const result = await sendManualBookingEmail(booking.id)
+      
+      if (result.success) {
+        toast({
+          title: "Email trimis",
+          description: result.message,
+          variant: "default",
+        })
+        // Refresh lista pentru a vedea statusul email-ului actualizat
+        await fetchBookings()
+      } else {
+        toast({
+          title: "Eroare la trimiterea email-ului",
+          description: result.message,
+          variant: "destructive",
+        })
+      }
+    } catch (error) {
+      console.error("Send email error:", error)
+      toast({ 
+        title: "Eroare", 
+        description: "Eroare la trimiterea email-ului. Încercați din nou.", 
+        variant: "destructive" 
+      })
+    } finally {
+      setIsSendingEmail(false)
+      setSendingEmailBookingId(null)
+    }
+  }
+
+  const handleRetryOblioInvoice = async (booking: Booking) => {
+    if (!isAdmin) {
+      toast({
+        title: "Acces restricționat",
+        description: "Doar administratorii pot re-factura manual în Oblio.",
+        variant: "destructive",
+      })
+      return
+    }
+
+    if (!canRetryOblioInvoice(booking)) {
+      toast({
+        title: "Rezervare neeligibilă",
+        description: "Re-facturarea manuală este disponibilă doar pentru rezervări paid online (webhook/test_mode) neanulate.",
+        variant: "destructive",
+      })
+      return
+    }
+
+    setRetryingOblioBookingId(booking.id)
+    try {
+      const res = await adminAuthorizedFetch("/api/admin/bookings/retry-oblio-invoice", user, {
+        method: "POST",
+        body: JSON.stringify({ bookingId: booking.id }),
+      })
+      const json = await res.json().catch(() => ({}))
+
+      if (!res.ok || !json?.success) {
+        throw new Error(json?.error || `HTTP ${res.status}`)
+      }
+
+      toast({
+        title: "Factură Oblio regenerată",
+        description: json?.invoiceNumber
+          ? `Factura ${json.invoiceNumber} a fost generată cu succes.`
+          : "Factura Oblio a fost generată cu succes.",
+      })
+
+      await fetchBookings()
+      if (selectedBooking?.id === booking.id) {
+        setSelectedBooking((prev) =>
+          prev
+            ? ({
+                ...prev,
+                oblio: {
+                  ...(prev.oblio || {}),
+                  status: "success",
+                  lastError: null,
+                  invoiceNumber: json?.invoiceNumber || prev.oblio?.invoiceNumber,
+                  invoiceUrl: json?.invoiceUrl || prev.oblio?.invoiceUrl,
+                  lastSource: "manual",
+                },
+              } as Booking)
+            : prev,
+        )
+      }
+    } catch (error) {
+      console.error("Manual Oblio retry failed:", error)
+      toast({
+        title: "Eroare la re-facturare Oblio",
+        description: error instanceof Error ? error.message : "Nu s-a putut genera factura Oblio.",
+        variant: "destructive",
+      })
+      await fetchBookings()
+    } finally {
+      setRetryingOblioBookingId(null)
+    }
+  }
+
+  const handleUpdateManualPaymentStatus = async (booking: Booking, newStatus: string) => {
+    setIsUpdatingPayment(true)
+    setUpdatingPaymentBookingId(booking.id)
+    
+    try {
+      const bookingRef = doc(db, 'bookings', booking.id)
+      await updateDoc(bookingRef, {
+        manualPaymentStatus: newStatus,
+        lastUpdated: serverTimestamp()
+      })
+      
+      const statusLabels = {
+        'not_paid': 'Nu este plătită',
+        'partial': 'Parțial plătită', 
+        'paid': 'Plătită',
+        'refunded': 'Rambursată'
+      }
+      
+      toast({
+        title: "Status actualizat",
+        description: `Statusul plății a fost schimbat în "${statusLabels[newStatus as keyof typeof statusLabels]}"`,
+        variant: "default",
+      })
+      
+      // Refresh lista pentru a vedea statusul actualizat
+      await fetchBookings()
+    } catch (error) {
+      console.error("Update payment status error:", error)
+      toast({ 
+        title: "Eroare", 
+        description: "Eroare la actualizarea statusului plății. Încercați din nou.", 
+        variant: "destructive" 
+      })
+    } finally {
+      setIsUpdatingPayment(false)
+      setUpdatingPaymentBookingId(null)
+    }
+  }
+
+  const getStatusBadge = (status: string, booking?: Booking) => {
+    switch (status) {
+      case "confirmed_paid":
+        return <Badge className="bg-green-100 text-green-800">Confirmat</Badge>
+      case "confirmed_test":
+        return <Badge className="bg-blue-100 text-blue-800">Confirmat (Test)</Badge>
+      case "confirmed_pay_on_site":
+        // If it came through LPR, keep it LPR (not "pay on site") everywhere.
+        if (booking?.source === "lpr") {
+          return <Badge className="bg-purple-100 text-purple-800">LPR</Badge>
+        }
+        return <Badge className="bg-orange-100 text-orange-800">Plată la parcare</Badge>
+      case "cancelled_by_admin":
+        return <Badge className="bg-red-100 text-red-800">ANULATĂ</Badge>
+      case "cancelled_by_api":
+        return <Badge className="bg-red-100 text-red-800">Anulat (API)</Badge>
+      case "cancelled_pay_on_site_timeout":
+        return <Badge className="bg-red-100 text-red-800">Anulat auto (Plată la parcare)</Badge>
+      case "api_error":
+        return <Badge className="bg-orange-100 text-orange-800">Eroare API</Badge>
+      case "expired":
+        return <Badge className="bg-gray-100 text-gray-800">Expirat</Badge>
+      default:
+        return <Badge className="bg-gray-100 text-gray-800">{status}</Badge>
+    }
+  }
+
+  const getPaymentStatusBadge = (status?: string) => {
+    // Doar două opțiuni vizibile în tabel: Achitat (verde) / Neplatit (roșu)
+    const isPaid = status === "paid"
+    return (
+      <Badge className={isPaid ? "bg-green-500 text-white" : "bg-red-500 text-white"}>
+        {isPaid ? "Achitat" : "Neplatit"}
+      </Badge>
+    )
+  }
+
+  const getManualPaymentStatusBadge = (booking: Booking) => {
+    const status = booking.manualPaymentStatus || "not_paid"
+    const isPaid = status === "paid"
+    return (
+      <Badge className={isPaid ? "bg-green-500 text-white" : "bg-red-500 text-white"}>
+        {isPaid ? "Achitat" : "Neplatit"}
+      </Badge>
+    )
+  }
+
+  const getPayOnSiteStatusBadge = (booking: Booking) => {
+    // Verifică dacă rezervarea a fost anulată
+    if (booking.payOnSiteStatus === "cancelled" || booking.status === "cancelled_by_admin" || booking.status === "cancelled_pay_on_site_timeout") {
+      return <Badge className="bg-red-500 text-white">Neplatit</Badge>
+    }
+    const isPaid = booking.paymentStatus === "paid"
+    return (
+      <Badge className={isPaid ? "bg-green-500 text-white" : "bg-red-500 text-white"}>
+        {isPaid ? "Achitat" : "Neplatit"}
+      </Badge>
+    )
+  }
+
+  const renderPaymentStatusCell = (booking: Booking) => {
+    // Pentru rezervările manuale, în tabel afișăm DOAR badge (fără modificări din tabel).
+    if (booking.source === "manual") {
+      return getManualPaymentStatusBadge(booking)
+    }
+
+    // LPR-origin bookings must stay LPR in UI & logic.
+    if (booking.source === "lpr" || booking.status === "unmatched_lpr") {
+      const isPaid = booking.paymentStatus === "paid"
+      return getPaymentStatusBadge(isPaid ? "paid" : "not_paid")
+    }
+    
+    // Pentru rezervările cu plată la parcare, afișăm DOAR badge (read-only).
+    if (isPayOnSiteBooking(booking)) {
+      return getPayOnSiteStatusBadge(booking)
+    }
+    
+    // Pentru rezervările normale (webhook/test), afișăm badge-ul simplu.
+    // IMPORTANT: keep consistent with header stats: confirmed_paid/paid implies Achitat even if paymentStatus is missing.
+    const s = String(booking.status || "")
+    const isPaid = booking.paymentStatus === "paid" || s === "confirmed_paid" || s === "paid"
+    return getPaymentStatusBadge(isPaid ? "paid" : "not_paid")
+  }
+
+  const GLOBAL_SEARCH_PAGE_SIZE = 25
+  const globalSearchTotalPages = Math.max(
+    1,
+    Math.ceil(globalSearchResults.length / GLOBAL_SEARCH_PAGE_SIZE),
+  )
+  const safeGlobalSearchPage = Math.min(globalSearchPage, globalSearchTotalPages)
+  const paginatedGlobalSearchResults = globalSearchResults.slice(
+    (safeGlobalSearchPage - 1) * GLOBAL_SEARCH_PAGE_SIZE,
+    safeGlobalSearchPage * GLOBAL_SEARCH_PAGE_SIZE,
+  )
+
+  if (authLoading || isLoading) {
+    return (
+      <div className="space-y-6">
+        {/* Titlu pagină */}
+        <div className="flex items-center justify-between gap-4">
+          <div className="space-y-2">
+            <Skeleton className="h-7 w-64" />
+            <Skeleton className="h-4 w-96" />
+          </div>
+          <Skeleton className="h-9 w-32" />
+        </div>
+
+        {/* Carduri de statistici */}
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
+          {Array.from({ length: 5 }).map((_, idx) => (
+            <Card key={`stat-skeleton-${idx}`}>
+              <CardHeader className="pb-2">
+                <Skeleton className="h-4 w-24" />
+              </CardHeader>
+              <CardContent className="space-y-2">
+                <Skeleton className="h-7 w-16" />
+                <Skeleton className="h-3 w-32" />
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+
+        {/* Tabs + bara filtre */}
+        <div className="space-y-3">
+          <div className="flex flex-wrap gap-2">
+            {Array.from({ length: 7 }).map((_, idx) => (
+              <Skeleton key={`tab-skeleton-${idx}`} className="h-9 w-24" />
+            ))}
+          </div>
+          <div className="flex flex-col gap-3 sm:flex-row">
+            <Skeleton className="h-9 flex-1" />
+            <Skeleton className="h-9 w-40" />
+            <Skeleton className="h-9 w-40" />
+          </div>
+        </div>
+
+        {/* Tabelul principal */}
+        <Card>
+          <CardHeader>
+            <Skeleton className="h-5 w-48" />
+            <Skeleton className="h-4 w-64" />
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-3">
+              {Array.from({ length: 6 }).map((_, idx) => (
+                <div key={`row-skeleton-${idx}`} className="flex items-center gap-4">
+                  <Skeleton className="h-5 w-20" />
+                  <Skeleton className="h-5 w-24" />
+                  <Skeleton className="h-5 w-32" />
+                  <Skeleton className="h-5 w-40" />
+                  <Skeleton className="h-5 flex-1" />
+                  <Skeleton className="h-5 w-20" />
+                  <Skeleton className="h-8 w-8 rounded-md" />
+                </div>
+              ))}
+            </div>
+            <div className="mt-4 flex items-center justify-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Se încarcă rezervările...
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    )
+  }
+  if (!user) {
+    return (
+      <div className="text-center p-8">
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Acces Neautorizat</AlertTitle>
+          <AlertDescription>
+            Trebuie să fiți autentificat ca administrator pentru a accesa această pagină.
+          </AlertDescription>
+        </Alert>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+        <div className="space-y-2">
+        <h1 className="text-2xl font-bold tracking-tight">Gestionare Rezervări</h1>
+          <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
+            <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
+              <div className="flex items-center gap-2">
+                <CalendarIcon className="h-4 w-4 text-muted-foreground" />
+                <Input
+                  type="date"
+                  value={formatInputDate(dateRange.from)}
+                  onChange={(e) => handleDateInputChange("from")(e.target.value)}
+                  className="w-full sm:w-44"
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-muted-foreground">→</span>
+                <Input
+                  type="date"
+                  value={formatInputDate(dateRange.to)}
+                  onChange={(e) => handleDateInputChange("to")(e.target.value)}
+                  className="w-full sm:w-44"
+                />
+              </div>
+            </div>
+            {(searchTerm || statusFilter !== "all" || dateRange.from || dateRange.to) && (
+              <Button
+                variant="ghost"
+                onClick={() => {
+                  setSearchTerm("")
+                  setStatusFilter("all")
+                  setDateRange(demoDateRange())
+                }}
+                className="hover:text-white"
+              >
+                Resetează
+              </Button>
+            )}
+            <div className="text-xs text-blue-700 font-mono">
+              Creată la:{" "}
+              {dateRange.from
+                ? dateRange.to
+                  ? `${formatDateFn(dateRange.from, "dd.MM.yyyy")} - ${formatDateFn(dateRange.to, "dd.MM.yyyy")}`
+                  : formatDateFn(dateRange.from, "dd.MM.yyyy")
+                : "neselectat"}
+            </div>
+          </div>
+     
+        </div>
+        <div className="flex gap-2">
+          {user && isAdmin && (
+            <Button 
+              onClick={() => setIsManualDialogOpen(true)}
+              variant="default"
+              size="sm"
+            >
+              + Adaugă Manual
+            </Button>
+          )}
+        
+          <Button onClick={() => fetchBookings(dateRange)} disabled={isLoading} size="sm">
+            {isLoading ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <RefreshCw className="h-4 w-4 mr-2" />}
+            Reîncarcă
+          </Button>
+        </div>
+      </div>
+
+      {isAdmin && oblioOpsAlert && (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Alertă Oblio activă</AlertTitle>
+          <AlertDescription>
+            {`Eroare repetitivă Oblio: ${oblioOpsAlert.lastCountInWindow ?? "?"}/${oblioOpsAlert.threshold ?? 3} în ultimele ${
+              oblioOpsAlert.windowMinutes ?? 5
+            } minute.`}{" "}
+            {`Ultimul eveniment: ${
+              (() => {
+                const lastEventDate = parseFirestoreDate(oblioOpsAlert.lastEventAt)
+                return lastEventDate ? formatDateFn(lastEventDate, "dd MMM yyyy, HH:mm:ss", { locale: ro }) : "N/A"
+              })()
+            }.`}{" "}
+            {`Tip: ${oblioOpsAlert.lastErrorKind || "invoice_error"}.`}
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {/* Bara de statistici rapide */}
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-6">
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium flex items-center gap-2">
+              Total
+              {isAdmin && (
+              <TooltipProvider delayDuration={150}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      className="inline-flex items-center justify-center rounded-sm text-muted-foreground hover:text-foreground"
+                      aria-label="Explicație calcul total"
+                    >
+                      <Info className="h-4 w-4" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent className="max-w-sm">
+                    <div className="text-xs leading-relaxed">
+                      <div className="font-semibold mb-1">Valoare totală (potențială) =</div>
+                      <div>
+                        Online ({onlineTotalCount}) + Plata la parcare ({payOnSiteTotalCount}) + Manual ({manualTotalCount})
+                      </div>
+                      <div className="mt-1">
+                        {onlineTotalValue.toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} +{" "}
+                        {payOnSiteTotalValue.toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} +{" "}
+                        {manualTotalValue.toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ={" "}
+                        {totalPotentialValue.toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} LEI
+                      </div>
+
+                      <div className="mt-2 font-semibold">Încasat / estimare operațională =</div>
+                      <div>
+                        Online achitat ({onlineReceivedCount}) + Plata la parcare ({payOnSiteEstimatedCount}) + Manual achitat ({manualPaidCount})
+                      </div>
+                      <div className="mt-1">
+                        {onlineReceivedValue.toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} +{" "}
+                        {payOnSiteEstimatedValue.toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} +{" "}
+                        {manualPaidValue.toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ={" "}
+                        {totalProRataValue.toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} LEI
+                      </div>
+
+                      <div className="mt-2 text-muted-foreground">
+                        În tabel: {totalCount} rânduri (LPR fără rezervare: {lprNoReservationCount}, anulate/expirate: {lostCount}).
+                        LPR fără rezervare intră în valoare doar după ieșire.
+                      </div>
+                    </div>
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+              )}
+            </CardTitle>
+            <CardDescription className="text-xs">Total rezervări în interval</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{totalCount}</div>
+            {isAdmin && (
+            <p className="text-xs text-muted-foreground">
+              Valoare totală:{" "}
+              <span className="font-semibold">
+                {totalPotentialValue.toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} LEI
+              </span>
+              {pricesLoading && (
+                <span className="ml-2 text-[10px] text-gray-500">(se calculează tarifele…)</span>
+              )}
+            </p>
+            )}
+            
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium">Aplicație mobilă</CardTitle>
+            <CardDescription className="text-xs">Rezervări prin aplicația mobilă</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-sky-700">{mobileAppCount}</div>
+            {isAdmin && (
+            <p className="text-xs text-muted-foreground">
+              Valoare totală:{" "}
+              <span className="font-semibold text-sky-700">
+                {mobileAppValue.toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} LEI
+              </span>
+            </p>
+            )}
+            <p className="mt-1 text-xs text-muted-foreground">Incluse în Online și în Total</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium">Online</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-green-700">{onlineTotalCount}</div>
+            {isAdmin && (
+            <p className="text-xs text-muted-foreground">
+              Încasat:{" "}
+              <span className="font-semibold text-green-700">
+                {onlineReceivedValue.toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} LEI
+              </span>
+            </p>
+            )}
+            <p className="text-[11px] text-muted-foreground">
+              Achitate: <span className="font-semibold">{onlineReceivedCount}</span> · Neplătite:{" "}
+              <span className="font-semibold">{onlineUnpaidCount}</span>
+            </p>
+          
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium">Plata la parcare</CardTitle>
+            <CardDescription className="text-xs">De încasat la parcare</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-orange-700">{payOnSiteTotalCount}</div>
+            {isAdmin && (
+            <p className="text-xs text-muted-foreground">
+              Valoare totală:{" "}
+              <span className="font-semibold text-orange-700">
+                {payOnSiteTotalValue.toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} LEI
+              </span>
+            </p>
+            )}
+            
+           
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium">Manual achitat</CardTitle>
+            <CardDescription className="text-xs">Doar rezervări manuale achitate</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-blue-700">{manualPaidCount}</div>
+            {isAdmin && (
+            <p className="text-xs text-muted-foreground">
+              Valoare totală:{" "}
+              <span className="font-semibold text-blue-700">
+                {manualPaidValue.toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} LEI
+              </span>
+            </p>
+            )}
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium">LPR fără rezervare</CardTitle>
+            <CardDescription className="text-xs">Număr + valoare doar după ieșire</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-purple-700">{lprNoReservationCount}</div>
+            <p className="text-[11px] text-muted-foreground">
+              Ieșite (cu valoare): <span className="font-semibold">{lprNoReservationCompletedCount}</span>
+            </p>
+            {isAdmin && (
+            <p className="text-xs text-muted-foreground">
+                Valoare totală (doar ieșite):{" "}
+                <span className="font-semibold text-purple-700">
+                  {lprNoReservationCompletedValue.toLocaleString("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} LEI
+                </span>
+            </p>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      {isAdmin && (
+      <div className="flex items-center justify-end">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => setShowCalcExplanation((v) => !v)}
+        >
+          {showCalcExplanation ? "Ascunde explicație calcule" : "Vezi explicație calcule"}
+        </Button>
+      </div>
+      )}
+
+      {isAdmin && showCalcExplanation && (
+        <Card className="bg-slate-50 border-slate-200">
+          <CardContent className="py-4 text-sm text-slate-700">
+            Pentru intervalul selectat, sistemul ia toate rezervările care se suprapun cu perioada aleasă și calculează
+            valoarea doar pentru zilele care cad în acel interval. Tariful pe zi este luat automat din pagina Prețuri.
+            Apoi sumele sunt separate în: Online încasat (deja plătit), Plata la parcare (de încasat la parcare) și
+            Manual achitat. LPR fără rezervare este afișat separat ca număr.
+          </CardContent>
+        </Card>
+      )}
+
+      <Tabs defaultValue="all" className="space-y-4">
+        <TabsList>
+          <TabsTrigger value="all" onClick={() => setStatusFilter("all")}>
+            Toate
+          </TabsTrigger>
+          <TabsTrigger value="occupied" onClick={() => setStatusFilter("occupied")}>
+            Ocupate
+          </TabsTrigger>
+          <TabsTrigger value="exited" onClick={() => setStatusFilter("exited")}>
+            Ieșite
+          </TabsTrigger>
+          <TabsTrigger value="online" onClick={() => setStatusFilter("online")}>
+            Online
+          </TabsTrigger>
+       
+          <TabsTrigger value="manual" onClick={() => setStatusFilter("manual")}>
+                            <span className="text-orange-700">Manual</span>
+          </TabsTrigger>
+          <TabsTrigger value="pay_on_site" onClick={() => setStatusFilter("pay_on_site")}>
+            <span className="text-orange-700">Plată la parcare</span>
+          </TabsTrigger>
+          <TabsTrigger value="cancelled_by_admin" onClick={() => setStatusFilter("cancelled_by_admin")}>
+            Anulate
+          </TabsTrigger>
+      
+          <TabsTrigger value="unmatched_lpr" onClick={() => setStatusFilter("unmatched_lpr")}>
+            <span className="text-purple-700">Fără rezervare (LPR)</span>
+          </TabsTrigger>
+          <TabsTrigger value="mobile_app" onClick={() => setStatusFilter("mobile_app")}>
+            Mobile App
+          </TabsTrigger>
+        </TabsList>
+
+        <div className="flex flex-col sm:flex-row gap-4 items-center">
+          <div className="relative w-full sm:w-auto flex-1">
+            <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-gray-500" />
+            <Input
+              type="search"
+              placeholder="Caută ID, Nr. Înmat., Client, API Nr..."
+              className="pl-8"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+            />
+          </div>
+          <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
+            <div className="flex items-center gap-2">
+              <CalendarIcon className="h-4 w-4 text-muted-foreground" />
+              <Input
+                type="date"
+                value={formatInputDate(dateRange.from)}
+                onChange={(e) => handleDateInputChange("from")(e.target.value)}
+                className="w-full sm:w-40"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-muted-foreground">→</span>
+              <Input
+                type="date"
+                value={formatInputDate(dateRange.to)}
+                onChange={(e) => handleDateInputChange("to")(e.target.value)}
+                className="w-full sm:w-40"
+              />
+            </div>
+            {(searchTerm || statusFilter !== "all" || dateRange.from || dateRange.to) && (
+              <Button
+                variant="ghost"
+                onClick={() => {
+                  setSearchTerm("")
+                  setStatusFilter("all")
+                  setDateRange(demoDateRange())
+                }}
+                className="hover:text-white"
+              >
+                Resetează
+              </Button>
+            )}
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => void loadPlateIndex({ force: true })}
+                    disabled={plateIndexLoading}
+                    className="h-9 w-9"
+                    aria-label="Resincronizează indexul pentru căutarea globală"
+                  >
+                    {plateIndexLoading ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <RefreshCw className="h-4 w-4" />
+                    )}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  <p className="text-xs">
+                    Resincronizează indexul pentru căutare globală
+                    {plateIndexLoadedAt
+                      ? ` (ultima: ${formatDateFn(new Date(plateIndexLoadedAt), "HH:mm:ss")})`
+                      : ""}
+                  </p>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          </div>
+        </div>
+
+        {/* Secțiune „Rezultate globale” — vizibilă când user-ul caută ceva */}
+        {searchTerm.trim().length >= 2 && (
+          <Card className="border-blue-200 bg-blue-50/30">
+            <CardHeader className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <CardTitle className="text-base text-blue-900">
+                  Rezultate globale (indiferent de interval)
+                </CardTitle>
+                <CardDescription>
+                  Caută în toată baza de date după număr, client sau email. Acoperă și rezervările
+                  din afara intervalului „Creată la” selectat.
+                </CardDescription>
+              </div>
+              <div className="flex items-center gap-2">
+                {globalSearchLoading ? (
+                  <Badge variant="outline" className="bg-white">
+                    <Loader2 className="mr-1 h-3 w-3 animate-spin" /> caută...
+                  </Badge>
+                ) : (
+                  <Badge variant="outline" className="bg-white">
+                    {globalSearchResults.length} rezultat{globalSearchResults.length === 1 ? "" : "e"}
+                  </Badge>
+                )}
+                {plateIndexLoading && (
+                  <Badge variant="outline" className="bg-white">
+                    <Loader2 className="mr-1 h-3 w-3 animate-spin" /> index se încarcă
+                  </Badge>
+                )}
+              </div>
+            </CardHeader>
+            <CardContent>
+              {globalSearchLoading && globalSearchResults.length === 0 ? (
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Nr. API / ID</TableHead>
+                        <TableHead>Nr. Înmatriculare</TableHead>
+                        <TableHead>Client</TableHead>
+                        <TableHead>Perioada</TableHead>
+                        <TableHead>Creată la</TableHead>
+                        <TableHead>Status</TableHead>
+                        <TableHead className="text-right">Acțiuni</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {Array.from({ length: 3 }).map((_, idx) => (
+                        <TableRow key={`global-skeleton-${idx}`}>
+                          <TableCell>
+                            <Skeleton className="h-4 w-20" />
+                          </TableCell>
+                          <TableCell>
+                            <Skeleton className="h-4 w-24" />
+                          </TableCell>
+                          <TableCell>
+                            <Skeleton className="h-4 w-32" />
+                          </TableCell>
+                          <TableCell>
+                            <Skeleton className="h-4 w-40" />
+                          </TableCell>
+                          <TableCell>
+                            <Skeleton className="h-4 w-28" />
+                          </TableCell>
+                          <TableCell>
+                            <Skeleton className="h-5 w-20 rounded-full" />
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <Skeleton className="ml-auto h-8 w-24" />
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              ) : globalSearchResults.length === 0 && !globalSearchLoading ? (
+                <div className="py-4 text-center text-sm text-gray-500">
+                  Niciun rezultat global pentru „{searchTerm}”.
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Nr. API / ID</TableHead>
+                        <TableHead>Nr. Înmatriculare</TableHead>
+                        <TableHead>Client</TableHead>
+                        <TableHead>Perioada</TableHead>
+                        <TableHead>Creată la</TableHead>
+                        <TableHead>Status</TableHead>
+                        <TableHead className="text-right">Acțiuni</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {paginatedGlobalSearchResults.map((booking) => (
+                        <TableRow key={`global-${booking.id}`}>
+                          <TableCell className="font-medium">
+                            {renderBookingApiColumn(booking)}
+                          </TableCell>
+                          <TableCell>{booking.licensePlate}</TableCell>
+                          <TableCell>{booking.clientName || "N/A"}</TableCell>
+                          <TableCell>
+                            {booking.startDate && booking.endDate ? (
+                              <span className="text-xs text-gray-800">
+                                {formatDateFn(parseISO(booking.startDate), "dd MMM", { locale: ro })}{" "}
+                                {booking.startTime || "--:--"} →{" "}
+                                {formatDateFn(parseISO(booking.endDate), "dd MMM", { locale: ro })}{" "}
+                                {booking.endTime || "--:--"}
+                              </span>
+                            ) : (
+                              <span className="text-xs text-gray-400">-</span>
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            {booking.createdAt
+                              ? formatDateFn(booking.createdAt.toDate(), "dd MMM yyyy, HH:mm", {
+                                  locale: ro,
+                                })
+                              : "N/A"}
+                          </TableCell>
+                          <TableCell>{getStatusBadge(String(booking.status || ""), booking)}</TableCell>
+                          <TableCell className="text-right">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => handleViewBooking(booking)}
+                            >
+                              <Eye className="mr-2 h-4 w-4" /> Deschide
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                      {globalSearchLoading && (
+                        <TableRow>
+                          <TableCell colSpan={7} className="py-2">
+                            <div className="flex items-center gap-2 text-xs text-blue-700">
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                              Se actualizează rezultatele...
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </TableBody>
+                  </Table>
+                  {globalSearchResults.length > GLOBAL_SEARCH_PAGE_SIZE && (
+                    <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="text-xs text-gray-500">
+                        Afișezi{" "}
+                        {(safeGlobalSearchPage - 1) * GLOBAL_SEARCH_PAGE_SIZE + 1} -{" "}
+                        {Math.min(safeGlobalSearchPage * GLOBAL_SEARCH_PAGE_SIZE, globalSearchResults.length)}{" "}
+                        din {globalSearchResults.length} rezultate globale
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setGlobalSearchPage((p) => Math.max(1, p - 1))}
+                          disabled={safeGlobalSearchPage === 1}
+                        >
+                          Anterioară
+                        </Button>
+                        <span className="text-xs text-gray-600">
+                          Pagina {safeGlobalSearchPage} din {globalSearchTotalPages}
+                        </span>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() =>
+                            setGlobalSearchPage((p) => Math.min(globalSearchTotalPages, p + 1))
+                          }
+                          disabled={safeGlobalSearchPage >= globalSearchTotalPages}
+                        >
+                          Următoare
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        )}
+
+        <Card>
+          <CardHeader className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <CardTitle>Lista Rezervărilor</CardTitle>
+              <CardDescription>Vizualizează și gestionează rezervările.</CardDescription>
+            </div>
+         
+          </CardHeader>
+          <CardContent>
+            {/* Info paginare (deasupra tabelului) */}
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 mb-3 text-xs text-gray-600">
+              <div>
+                <span>
+                  Afișezi{" "}
+                  {filteredBookings.length === 0
+                    ? 0
+                    : (currentPage - 1) * pageSize + 1}{" "}
+                  -{" "}
+                  {Math.min(currentPage * pageSize, filteredBookings.length)}{" "}
+                  din {filteredBookings.length} rezervări
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span>Pe pagină:</span>
+                <select
+                  value={pageSize}
+                  onChange={(e) => {
+                    const newSize = Number(e.target.value) || 25
+                    setPageSize(newSize)
+                    setCurrentPage(1)
+                  }}
+                  className="border rounded px-2 py-1 text-xs bg-white"
+                >
+                  <option value={10}>10</option>
+                  <option value={25}>25</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                </select>
+              </div>
+            </div>
+
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Nr. API</TableHead>
+                  <TableHead>Nr. Înmatriculare</TableHead>
+                  <TableHead>Client</TableHead>
+                  <TableHead>Perioada</TableHead>
+                  <TableHead className="w-64">LPR Intrare / Ieșire</TableHead>
+                  <TableHead>Plată</TableHead>
+                <TableHead>Status</TableHead>
+                  <TableHead>T&C</TableHead>
+                  <TableHead>Creată la</TableHead>
+                  <TableHead className="text-right">Acțiuni</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {filteredBookings.length === 0 ? (
+                  <TableRow>
+                  <TableCell colSpan={10} className="text-center py-8 text-gray-500">
+                      Nu s-au găsit rezervări.
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  filteredBookings
+                    .slice(
+                      (currentPage - 1) * pageSize,
+                      (currentPage - 1) * pageSize + pageSize,
+                    )
+                    .map((booking) => (
+                    <TableRow
+                      key={booking.id}
+                      className={
+                        booking.source === "manual"
+                          ? "bg-orange-50 hover:bg-orange-100 border-l-4 border-l-orange-400"
+                          : isPayOnSiteBooking(booking)
+                          ? "bg-orange-100 hover:bg-orange-200 border-l-4 border-l-orange-500"
+                          : ""
+                      }
+                    >
+                      {/* helper pentru afișarea simplă a orelor LPR (intrare / ieșire) */}
+                      {(() => {
+                        const lpr: any = (booking as any).lpr || {}
+                        let lprTimesLabel: string | null = null
+
+                        const entryStr = lpr.arrivedAt
+                          ? formatLprDateTime(lpr.arrivedAt)
+                          : "-"
+                        const exitStr = lpr.departedAt
+                          ? formatLprDateTime(lpr.departedAt)
+                          : "-"
+
+                        lprTimesLabel = `${entryStr} / ${exitStr}`
+
+                        ;(booking as any)._lprTimesLabel = lprTimesLabel
+                        return null
+                      })()}
+                          <TableCell className="font-medium">
+                            {renderBookingApiColumn(booking)}
+                          </TableCell>
+                        <TableCell>{booking.licensePlate}</TableCell>
+                        <TableCell>{booking.clientName || "N/A"}</TableCell>
+                        <TableCell>
+                          <div className="flex flex-col">
+                            {booking.startDate && booking.endDate ? (
+                              <>
+                                {formatDateFn(parseISO(booking.startDate), "dd MMM", { locale: ro })}{" "}
+                                {booking.startTime || "--:--"} -{" "}
+                                {formatDateFn(parseISO(booking.endDate), "dd MMM", { locale: ro })}{" "}
+                                {booking.endTime || "--:--"}
+                              </>
+                            ) : (
+                              <span className="text-xs text-gray-400">Perioadă nesetată (LPR / manuală)</span>
+                            )}
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex flex-col space-y-1">
+                            {(booking as any)._lprTimesLabel ? (
+                              <span className="text-xs text-gray-800">
+                                {(booking as any)._lprTimesLabel}
+                              </span>
+                            ) : (
+                              <span className="text-xs text-gray-400">-</span>
+                            )}
+                          </div>
+                        </TableCell>
+                        <TableCell>{renderPaymentStatusCell(booking)}</TableCell>
+                        <TableCell>{getStatusBadge(String(booking.status || ""), booking)}</TableCell>
+                        <TableCell className="text-center">
+                          {booking.termsAccepted ? (
+                            <span className="text-green-600" title="Termeni acceptați">
+                              ✅
+                            </span>
+                          ) : (
+                            <span className="text-red-600" title="Termeni nu au fost acceptați">
+                              ❌
+                            </span>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          {booking.createdAt
+                            ? formatDateFn(booking.createdAt.toDate(), "dd MMM yyyy, HH:mm", { locale: ro })
+                            : "N/A"}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button variant="ghost" size="icon">
+                                <MoreHorizontal className="h-4 w-4" />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end">
+                              <DropdownMenuItem
+                                onClick={() => handleViewBooking(booking)}
+                                className="hover:text-white focus:text-white"
+                              >
+                                <Eye className="mr-2 h-4 w-4" /> Vizualizează
+                              </DropdownMenuItem>
+
+                              {/* Buton pentru trimiterea email-ului cu QR code */}
+                              {booking.clientEmail && (booking.apiBookingNumber || isPayOnSiteBooking(booking)) && (
+                                <DropdownMenuItem
+                                  onClick={() => handleSendEmail(booking)}
+                                  disabled={isSendingEmail}
+                                  className="text-blue-600 focus:text-white focus:bg-blue-600 hover:text-white hover:bg-blue-600"
+                                >
+                                  {isSendingEmail && sendingEmailBookingId === booking.id ? (
+                                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                  ) : (
+                                    <Mail className="mr-2 h-4 w-4" />
+                                  )}
+                                  {isPayOnSiteBooking(booking) ? "Simulează email (fără QR)" : "Simulează email cu QR"}
+                                </DropdownMenuItem>
+                              )}
+
+                              {/* Completează din LPR pentru rezervările unmatched_lpr */}
+                              {booking.status === "unmatched_lpr" && (
+                                <>
+                                  <DropdownMenuSeparator />
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setLprBookingToComplete(booking)
+                                      setLprExitDate(new Date())
+                                      setLprExitTime("12:00")
+                                      setLprClientName(booking.clientName || "")
+                                      setLprClientPhone(booking.clientPhone || "")
+                                      setLprClientEmail(booking.clientEmail || "")
+                                      setLprPersons(
+                                        (booking.numberOfPersons || 1).toString(),
+                                      )
+                                      setIsLprCompleteDialogOpen(true)
+                                    }}
+                                    className="text-purple-700 hover:text-white hover:bg-purple-600 focus:text-white focus:bg-purple-600"
+                                  >
+                                    Completează din LPR
+                                  </DropdownMenuItem>
+                                </>
+                              )}
+
+                              {isAdmin && (
+                                <>
+                                  <DropdownMenuSeparator />
+                                  <DropdownMenuItem
+                                    onClick={() => openManualLprDialog(booking)}
+                                    className="text-purple-700 hover:text-white hover:bg-purple-600 focus:text-white focus:bg-purple-600"
+                                  >
+                                    Setează LPR manual (intrare/ieșire)
+                                  </DropdownMenuItem>
+                                </>
+                              )}
+                              {booking.status === "api_error" && booking.paymentStatus === "paid" && (
+                                <>
+                                  <DropdownMenuSeparator />
+                                  <DropdownMenuItem
+                                    onClick={() => handleRecoverBooking(booking)}
+                                    className="text-blue-600 focus:text-white focus:bg-blue-600 hover:text-white hover:bg-blue-600"
+                                    disabled={isRecovering}
+                                  >
+                                    {isRecovering && selectedBooking?.id === booking.id ? (
+                                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                    ) : null}
+                                    Recuperează Rezervarea
+                                  </DropdownMenuItem>
+                                </>
+                              )}
+
+                              {(booking as any).lpr?.isInside === true && (
+                                <>
+                                  <DropdownMenuSeparator />
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setBookingToMarkExit(booking)
+                                      setIsMarkExitDialogOpen(true)
+                                    }}
+                                    className="text-red-600 focus:text-white focus:bg-red-600 hover:text-white hover:bg-red-600"
+                                    disabled={markingExitId === booking.id}
+                                  >
+                                    {markingExitId === booking.id ? (
+                                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                    ) : null}
+                                    Marchează ieșire
+                                  </DropdownMenuItem>
+                                </>
+                              )}
+
+                              {isAdmin && (
+                                <>
+                                  <DropdownMenuSeparator />
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setBookingToCancel(booking)
+                                      setCancelReasonInput("")
+                                      setIsCancelDialogOpen(true)
+                                    }}
+                                    disabled={
+                                      String(booking.status || "").toLowerCase().includes("cancelled") ||
+                                      String(booking.status || "").toLowerCase() === "expired"
+                                    }
+                                    className="text-red-700 hover:text-white hover:bg-red-700 focus:text-white focus:bg-red-700"
+                                  >
+                                    <XCircle className="mr-2 h-4 w-4" />
+                                    Anulează
+                                  </DropdownMenuItem>
+                                </>
+                              )}
+
+                              <DropdownMenuItem
+                                onClick={() => {
+                                  setBookingToEditPlate(booking)
+                                  setNewPlateInput(booking.licensePlate || "")
+                                  setIsEditPlateDialogOpen(true)
+                                }}
+                                disabled={
+                                  !user ||
+                                  String(booking.status || "").toLowerCase().includes("cancelled") ||
+                                  String(booking.status || "").toLowerCase() === "expired"
+                                }
+                              >
+                                <Pencil className="mr-2 h-4 w-4" />
+                                Modifică nr. înmatriculare
+                              </DropdownMenuItem>
+                              
+
+                              {isAdmin && (
+                                <>
+                                  <DropdownMenuSeparator />
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setBookingToDelete(booking)
+                                      setIsDeleteDialogOpen(true)
+                                    }}
+                                    disabled={isDeleting && bookingToDelete?.id === booking.id}
+                                    className="text-red-700 hover:text-white hover:bg-red-700 focus:text-white focus:bg-red-700"
+                                  >
+                                    {isDeleting && bookingToDelete?.id === booking.id ? (
+                                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                    ) : (
+                                      <Trash2 className="mr-2 h-4 w-4" />
+                                    )}
+                                    Șterge (permanent)
+                                  </DropdownMenuItem>
+                                </>
+                              )}
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        </TableCell>
+                      </TableRow>
+                    ))
+                )}
+              </TableBody>
+            </Table>
+
+            {/* Controale paginare (sub tabel) */}
+            {filteredBookings.length > 0 && (
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 mt-4">
+                <div className="text-xs text-gray-600">
+                  Pagina {currentPage} din{" "}
+                  {Math.max(1, Math.ceil(filteredBookings.length / pageSize))}
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                    disabled={currentPage === 1}
+                  >
+                    Anterioară
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      setCurrentPage((p) =>
+                        Math.min(
+                          Math.max(1, Math.ceil(filteredBookings.length / pageSize)),
+                          p + 1,
+                        ),
+                      )
+                    }
+                    disabled={
+                      currentPage >= Math.ceil(filteredBookings.length / pageSize)
+                    }
+                  >
+                    Următoare
+                  </Button>
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+      </Tabs>
+
+      <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Ștergi rezervarea?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Această acțiune este permanentă. Înainte de ștergere, sistemul va marca ieșirea (dacă mașina este încă
+              „înăuntru”) și va ajusta contorul de ocupare dacă este cazul.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="text-sm text-gray-700">
+            <div>
+              <strong>Nr. API / ID:</strong>{" "}
+              {bookingToDelete?.apiBookingNumber || bookingToDelete?.id || "-"}
+            </div>
+            <div>
+              <strong>Nr. înmatriculare:</strong> {bookingToDelete?.licensePlate || "-"}
+            </div>
+            <div className="text-xs text-gray-500 mt-1">
+              {shouldCancelInMultipark(bookingToDelete)
+                ? "Se va anula și în Multipark înainte de ștergere."
+                : "Rezervarea nu are număr API; ștergerea este doar locală."}
+            </div>
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel
+              onClick={() => {
+                setBookingToDelete(null)
+              }}
+            >
+              Renunță
+            </AlertDialogCancel>
+            <AlertDialogAction onClick={handleDeleteBooking} disabled={!bookingToDelete || isDeleting}>
+              {isDeleting ? "Se șterge..." : "Șterge"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={isMarkExitDialogOpen}
+        onOpenChange={(open) => {
+          setIsMarkExitDialogOpen(open)
+          if (!open) setBookingToMarkExit(null)
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Marchezi ieșirea manual?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Această acțiune setează <strong>lpr.isInside=false</strong> și <strong>lpr.departedAt=acum</strong>. Dacă
+              rezervarea a incrementat contorul de ocupare și nu a fost încă decrementată, sistemul va face și{" "}
+              <strong>-1</strong> la ocupare (idempotent).
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="text-sm text-gray-700">
+            <div>
+              <strong>Nr. API / ID:</strong>{" "}
+              {bookingToMarkExit?.apiBookingNumber || bookingToMarkExit?.id || "-"}
+            </div>
+            <div>
+              <strong>Nr. înmatriculare:</strong> {bookingToMarkExit?.licensePlate || "-"}
+            </div>
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={Boolean(bookingToMarkExit?.id && markingExitId === bookingToMarkExit.id)}>
+              Renunță
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={async () => {
+                if (!bookingToMarkExit) return
+                const b = bookingToMarkExit
+                setIsMarkExitDialogOpen(false)
+                await handleMarkOutside(b)
+              }}
+              disabled={!bookingToMarkExit || Boolean(bookingToMarkExit?.id && markingExitId === bookingToMarkExit.id)}
+            >
+              {bookingToMarkExit?.id && markingExitId === bookingToMarkExit.id ? "Se marchează..." : "Marchează ieșire"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={isCancelDialogOpen}
+        onOpenChange={(open) => {
+          setIsCancelDialogOpen(open)
+          if (!open) {
+            setBookingToCancel(null)
+            setCancelReasonInput("")
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Anulezi rezervarea?</AlertDialogTitle>
+            <AlertDialogDescription>
+              După anulare, rezervarea nu va mai
+              apărea în Intrări/Ieșiri și statusul va fi marcat ca ANULATĂ.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="space-y-3">
+            <div className="text-sm text-gray-700">
+              <div>
+                <strong>Nr. API / ID:</strong> {bookingToCancel?.apiBookingNumber || bookingToCancel?.id || "-"}
+              </div>
+              <div>
+                <strong>Nr. înmatriculare:</strong> {bookingToCancel?.licensePlate || "-"}
+              </div>
+              <div>
+                <strong>Email client:</strong> {bookingToCancel?.clientEmail || "-"}
+              </div>
+              <div className="text-xs text-gray-500 mt-1">
+                {shouldCancelInMultipark(bookingToCancel)
+                  ? "Se va anula și în Multipark (și apoi local)."
+                  : "Rezervarea nu are număr API; anularea va fi doar locală."}
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="cancel-reason">Motiv anulare (opțional)</Label>
+              <Input
+                id="cancel-reason"
+                value={cancelReasonInput}
+                onChange={(e) => setCancelReasonInput(e.target.value)}
+                placeholder="Ex: Client a solicitat anularea"
+              disabled={isCancellingLocalBooking}
+              />
+            </div>
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isCancellingLocalBooking}>Renunță</AlertDialogCancel>
+          <AlertDialogAction onClick={handleCancelBooking} disabled={!bookingToCancel || isCancellingLocalBooking}>
+              {isCancellingLocalBooking ? "Se anulează..." : "Anulează"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <Dialog
+        open={isEditPlateDialogOpen}
+        onOpenChange={(open) => {
+          setIsEditPlateDialogOpen(open)
+          if (!open) {
+            setBookingToEditPlate(null)
+            setNewPlateInput("")
+            setSavingPlate(false)
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-[520px]">
+          <DialogHeader>
+            <DialogTitle>Modifică număr înmatriculare</DialogTitle>
+            <DialogDescription>
+           În vizualizare detalii se va păstra și numărul original.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="text-sm text-gray-700">
+              <div>
+                <strong>Rezervare:</strong> {bookingToEditPlate?.apiBookingNumber || bookingToEditPlate?.id || "-"}
+              </div>
+              <div>
+                <strong>Nr. curent:</strong> {bookingToEditPlate?.licensePlate || "-"}
+              </div>
+              {bookingToEditPlate?.originalLicensePlate &&
+                bookingToEditPlate.originalLicensePlate !== bookingToEditPlate.licensePlate && (
+                  <div>
+                    <strong>Nr. original:</strong> {bookingToEditPlate.originalLicensePlate}
+                  </div>
+                )}
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="plate-new">Nr. înmatriculare nou</Label>
+              <Input
+                id="plate-new"
+                value={newPlateInput}
+                onChange={(e) => setNewPlateInput(e.target.value)}
+                placeholder="Ex: B123ABC"
+                disabled={savingPlate}
+              />
+            </div>
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setIsEditPlateDialogOpen(false)}
+              disabled={savingPlate}
+            >
+              Renunță
+            </Button>
+            <Button type="button" onClick={handleSaveNewLicensePlate} disabled={savingPlate || !bookingToEditPlate?.id}>
+              {savingPlate ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+              Salvează
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={isManualLprDialogOpen}
+        onOpenChange={(open) => {
+          setIsManualLprDialogOpen(open)
+          if (!open) {
+            setManualLprBooking(null)
+            setManualLprConfirmOverwrite(false)
+            setSavingManualLpr(false)
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-[560px]">
+          <DialogHeader>
+            <DialogTitle>Setează LPR manual (ca în API)</DialogTitle>
+          </DialogHeader>
+
+          {manualLprBooking && (
+            <div className="space-y-4">
+              <div className="text-sm text-gray-700">
+                <div>
+                  <strong>Nr. API / ID:</strong>{" "}
+                  {!isPayOnSiteBooking(manualLprBooking)
+                    ? manualLprBooking.apiBookingNumber || manualLprBooking.id
+                    : manualLprBooking.id}
+                </div>
+                <div>
+                  <strong>Nr. înmatriculare:</strong> {manualLprBooking.licensePlate || "-"}
+                </div>
+                <div>
+                  <strong>Stare curentă:</strong>{" "}
+                  {((manualLprBooking as any).lpr?.isInside === true) ? "În parcare (isInside=true)" : "În afara parcării"}
+                </div>
+                <div className="text-xs text-gray-500 mt-1">
+                  Notă: această acțiune scrie în Firestore ca un eveniment LPR: `lpr_events` + `gateEvents` + `bookings.lpr.*` + ocupare idempotentă.
+                </div>
+              </div>
+
+              {!isAdmin && (
+                <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+                  Doar administratorii pot salva modificări manuale LPR.
+                </div>
+              )}
+
+              <div className="grid gap-4">
+                <div className="space-y-2">
+                  <Label>Tip eveniment</Label>
+                  <Select value={manualLprEventType} onValueChange={(v) => setManualLprEventType(v as any)}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Selectează tipul" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="entry">Intrare</SelectItem>
+                      <SelectItem value="exit">Ieșire</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="space-y-2">
+                    <Label htmlFor="manual-lpr-date-bookings">Data</Label>
+                    <Input
+                      id="manual-lpr-date-bookings"
+                      type="date"
+                      value={manualLprDate}
+                      disabled={savingManualLpr}
+                      onChange={(e) => setManualLprDate(e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="manual-lpr-time-bookings">Ora</Label>
+                    <Input
+                      id="manual-lpr-time-bookings"
+                      type="time"
+                      value={manualLprTime}
+                      disabled={savingManualLpr}
+                      onChange={(e) => setManualLprTime(e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                {(() => {
+                  const lpr: any = (manualLprBooking as any).lpr || {}
+                  const existing = manualLprEventType === "entry" ? lpr?.arrivedAt : lpr?.departedAt
+                  if (!existing) return null
+                  return (
+                    <div className="rounded-md border border-amber-200 bg-amber-50 p-3">
+                      <div className="text-sm text-amber-900">
+                        Există deja un timp LPR pentru acest eveniment:{" "}
+                        <span className="font-semibold">{formatLprDateTime(existing)}</span>. Pentru suprascriere, bifează confirmarea.
+                      </div>
+                      <div className="mt-3 flex items-center gap-2">
+                        <Checkbox
+                          id="manual-lpr-overwrite-bookings"
+                          checked={manualLprConfirmOverwrite}
+                          disabled={savingManualLpr}
+                          onCheckedChange={(v) => setManualLprConfirmOverwrite(v === true)}
+                        />
+                        <Label htmlFor="manual-lpr-overwrite-bookings" className="text-sm">
+                          Confirm suprascrierea valorii LPR existente
+                        </Label>
+                      </div>
+                    </div>
+                  )
+                })()}
+              </div>
+            </div>
+          )}
+
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setIsManualLprDialogOpen(false)}
+              disabled={savingManualLpr}
+            >
+              Renunță
+            </Button>
+            <Button
+              type="button"
+              onClick={saveManualLprEvent}
+              disabled={
+                savingManualLpr ||
+                !isAdmin ||
+                !manualLprBooking?.id ||
+                (() => {
+                  const lpr: any = (manualLprBooking as any)?.lpr || {}
+                  const existing = manualLprEventType === "entry" ? lpr?.arrivedAt : lpr?.departedAt
+                  return Boolean(existing) && !manualLprConfirmOverwrite
+                })()
+              }
+            >
+              {savingManualLpr ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+              Salvează
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={isViewDialogOpen} onOpenChange={setIsViewDialogOpen}>
+        <DialogContent className="flex max-h-[90vh] w-[calc(100vw-2rem)] max-w-6xl flex-col overflow-hidden p-0">
+          <DialogHeader className="border-b px-6 py-4 pr-12">
+            <DialogTitle>Detalii Rezervare</DialogTitle>
+          </DialogHeader>
+          {selectedBooking && (
+            <>
+            <div className="overflow-y-auto px-6 py-4">
+            <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+              <div className="min-w-0">
+                <h3 className="text-lg font-medium mb-2 text-gray-800">Informații Rezervare</h3>
+                <div className="space-y-1 text-sm break-words">
+                  <p className="break-all">
+                    <strong>ID Firestore:</strong> {selectedBooking.id}
+                  </p>
+                  <p>
+                    <strong>Canal rezervare:</strong>{" "}
+                    {isSelectedBookingMobileApp ? (
+                      <Badge className="bg-sky-100 text-sky-700 border-sky-300">Aplicația mobilă</Badge>
+                    ) : (
+                      <span className="text-gray-600">Website / Admin</span>
+                    )}
+                  </p>
+                  {selectedBooking.paymentProvider && (
+                    <p>
+                      <strong>Provider plată:</strong> {selectedBooking.paymentProvider.toUpperCase()}
+                    </p>
+                  )}
+                  {/* Pentru pay-on-site nu afișăm numărul de rezervare API (nu există în Multipark) */}
+                  {!isPayOnSiteBooking(selectedBooking) && (
+                    <p>
+                      <strong>Nr. Rez. API Parcare:</strong> {selectedBooking.apiBookingNumber || "N/A"}
+                    </p>
+                  )}
+                  <p>
+                    <strong>Status Intern:</strong> {getStatusBadge(selectedBooking.status, selectedBooking)}
+                  </p>
+                  <p>
+                    <strong>Nr. Înmatriculare (curent):</strong> {selectedBooking.licensePlate}
+                  </p>
+                  {selectedBooking.originalLicensePlate &&
+                    selectedBooking.originalLicensePlate !== selectedBooking.licensePlate && (
+                      <p className="text-xs text-gray-600">
+                        <strong>Nr. Înmatriculare (original):</strong> {selectedBooking.originalLicensePlate}
+                      </p>
+                    )}
+                  <p>
+                    <strong>Data Intrare:</strong>{" "}
+                    {selectedBooking.startDate
+                      ? `${formatDateFn(parseISO(selectedBooking.startDate), "dd MMM yyyy", { locale: ro })}, Ora: ${
+                          selectedBooking.startTime || "--:--"
+                        }`
+                      : "Nesetată"}
+                  </p>
+                  <p>
+                    <strong>Data Ieșire:</strong>{" "}
+                    {selectedBooking.endDate
+                      ? `${formatDateFn(parseISO(selectedBooking.endDate), "dd MMM yyyy", { locale: ro })}, Ora: ${
+                          selectedBooking.endTime || "--:--"
+                        }`
+                      : "Nesetată"}
+                  </p>
+                  {(() => {
+                    const lpr: any = (selectedBooking as any).lpr || {}
+                    if (selectedBooking.startDate && selectedBooking.startTime && lpr.arrivedAt) {
+                      // IMPORTANT: compare in the same basis as LPR display (camera-local stored as UTC clock).
+                      const plannedStart = new Date(`${selectedBooking.startDate}T${selectedBooking.startTime}:00Z`)
+                      const actualArr = parseFirestoreDate(lpr.arrivedAt)
+                      if (!actualArr) return null
+                      const diffMin = Math.round((actualArr.getTime() - plannedStart.getTime()) / (1000 * 60))
+                      if (!Number.isNaN(diffMin) && diffMin !== 0) {
+                        if (diffMin < 0) {
+                          return (
+                            <p className="text-xs text-blue-700">
+                              <strong>Intrare LPR:</strong> {formatLprDateTime(lpr.arrivedAt)} (intrat mai devreme cu{" "}
+                              {formatDelay(diffMin)})
+                            </p>
+                          )
+                        }
+                        return (
+                          <p className="text-xs text-red-700">
+                            <strong>Intrare LPR:</strong> {formatLprDateTime(lpr.arrivedAt)} (întârziat la intrare cu{" "}
+                            {formatDelay(diffMin)})
+                          </p>
+                        )
+                      }
+                    }
+                    if (lpr.arrivedAt) {
+                      return (
+                        <p className="text-xs text-gray-600">
+                          <strong>Intrare LPR:</strong> {formatLprDateTime(lpr.arrivedAt)}
+                        </p>
+                      )
+                    }
+                    return null
+                  })()}
+                  {(() => {
+                    const lpr: any = (selectedBooking as any).lpr || {}
+                    if (selectedBooking.endDate && selectedBooking.endTime && lpr.departedAt) {
+                      const planned = new Date(`${selectedBooking.endDate}T${selectedBooking.endTime}:00Z`)
+                      const actual = parseFirestoreDate(lpr.departedAt)
+                      if (!actual) return null
+                      const diffMin = Math.round((actual.getTime() - planned.getTime()) / (1000 * 60))
+                      if (!Number.isNaN(diffMin) && diffMin !== 0) {
+                        if (diffMin < 0) {
+                          return (
+                            <p className="text-xs text-blue-700">
+                              <strong>Ieșire LPR:</strong> {formatLprDateTime(lpr.departedAt)} (mai devreme cu{" "}
+                              {formatDelay(diffMin)})
+                            </p>
+                          )
+                        }
+                        return (
+                          <p className="text-xs text-red-700">
+                            <strong>Ieșire LPR:</strong> {formatLprDateTime(lpr.departedAt)} (întârziat cu{" "}
+                            {formatDelay(diffMin)})
+                          </p>
+                        )
+                      }
+                    }
+                    if (lpr.departedAt) {
+                      return (
+                        <p className="text-xs text-gray-600">
+                          <strong>Ieșire LPR:</strong> {formatLprDateTime(lpr.departedAt)}
+                        </p>
+                      )
+                    }
+                    return null
+                  })()}
+                  <p>
+                    <strong>Creată la:</strong>{" "}
+                    {selectedBooking.createdAt
+                      ? formatDateFn(selectedBooking.createdAt.toDate(), "dd MMM yyyy, HH:mm:ss", { locale: ro })
+                      : "N/A"}
+                  </p>
+                  {selectedBooking.apiMessage && (
+                    <p>
+                      <strong>Mesaj API:</strong> {selectedBooking.apiMessage}
+                    </p>
+                  )}
+                  <p>
+                    <strong>Durata reală:</strong> {selectedBooking.durationMinutes} minute ({(selectedBooking.durationMinutes / 60).toFixed(1)} ore)
+                  </p>
+                  {/* Pentru pay-on-site nu afișăm minutele API (nu se trimit la Multipark) */}
+                  {!isPayOnSiteBooking(selectedBooking) && selectedBooking.multiparkDurationMinutes && (
+                    <p>
+                      <strong>Minute în API:</strong> {selectedBooking.multiparkDurationMinutes} minute ({(selectedBooking.multiparkDurationMinutes / 60)} ore)
+                    </p>
+                  )}
+                </div>
+
+                {selectedBooking.activeModificationRequest && (
+                  <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm">
+                    <h3 className="mb-2 font-medium text-amber-900">Cerere modificare activă</h3>
+                    <div className="space-y-1 text-amber-950">
+                      {selectedBooking.activeModificationRequest.paymentPolicy === "pay_on_site_amount_updated" ||
+                      selectedBooking.activeModificationRequest.payOnSiteLocalOnly ? (
+                        <p>
+                          <strong>Tip modificare:</strong> Plată la parcare
+                        </p>
+                      ) : null}
+                      <p>
+                        <strong>Status:</strong> {selectedBooking.activeModificationRequest.status || "-"}
+                      </p>
+                      {selectedBooking.activeModificationRequest.finalValues && (
+                        <>
+                          <p>
+                            <strong>Perioadă nouă:</strong>{" "}
+                            {selectedBooking.activeModificationRequest.finalValues.startDate || "-"}{" "}
+                            {selectedBooking.activeModificationRequest.finalValues.startTime || "--:--"} →{" "}
+                            {selectedBooking.activeModificationRequest.finalValues.endDate || "-"}{" "}
+                            {selectedBooking.activeModificationRequest.finalValues.endTime || "--:--"}
+                          </p>
+                          <p>
+                            <strong>Mașină nouă:</strong>{" "}
+                            {selectedBooking.activeModificationRequest.finalValues.licensePlate || "-"}
+                          </p>
+                        </>
+                      )}
+                      <p>
+                        <strong>Diferență:</strong>{" "}
+                        {Number(selectedBooking.activeModificationRequest.difference || 0).toFixed(2)} RON
+                      </p>
+                      <p>
+                        <strong>Valoare inițială:</strong>{" "}
+                        {Number(selectedBooking.activeModificationRequest.currentAmount || 0).toFixed(2)} RON
+                      </p>
+                      <p>
+                        <strong>Valoare nouă:</strong>{" "}
+                        {Number(selectedBooking.activeModificationRequest.newAmount || 0).toFixed(2)} RON
+                      </p>
+                      {selectedBooking.activeModificationRequest.paymentPolicy === "pay_on_site_amount_updated" ||
+                      selectedBooking.activeModificationRequest.payOnSiteLocalOnly ? (
+                        <p>
+                          <strong>Noua valoare la parcare:</strong>{" "}
+                          {Number(selectedBooking.activeModificationRequest.newAmount || 0).toFixed(2)} RON
+                        </p>
+                      ) : (
+                        <>
+                          <p>
+                            <strong>De plată online:</strong>{" "}
+                            {Number(selectedBooking.activeModificationRequest.amountToPay || 0).toFixed(2)} RON
+                          </p>
+                          <p>
+                            <strong>Credit client:</strong>{" "}
+                            {Number(selectedBooking.activeModificationRequest.creditAmount || 0).toFixed(2)} RON
+                          </p>
+                        </>
+                      )}
+                      {selectedBooking.activeModificationRequest.paymentPolicy === "pay_on_site_amount_updated" ||
+                      selectedBooking.activeModificationRequest.payOnSiteLocalOnly ? (
+                        <p className="rounded-md border border-sky-200 bg-sky-50 px-2 py-1 font-medium text-sky-800">
+                          Suma a fost actualizată local. Clientul plătește noua valoare la parcare.
+                        </p>
+                      ) : Number(selectedBooking.activeModificationRequest.creditAmount || 0) > 0 ? (
+                        <p className="rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 font-medium text-emerald-800">
+                          Valoarea modificată este mai mică. Diferența rămâne avans pentru următoarea rezervare mobilă.
+                        </p>
+                      ) : null}
+                      {selectedBooking.activeModificationRequest.paymentPolicy !== "pay_on_site_amount_updated" &&
+                      !selectedBooking.activeModificationRequest.payOnSiteLocalOnly &&
+                      selectedBooking.activeModificationRequest.refundRequiredAmount ? (
+                        <p className="font-semibold text-red-700">
+                          Refund manual necesar: {Number(selectedBooking.activeModificationRequest.refundRequiredAmount).toFixed(2)} RON
+                        </p>
+                      ) : null}
+                    </div>
+                    {isAdmin && (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {selectedBooking.activeModificationRequest.status === "pending_admin_review" && (
+                          <>
+                            <Button
+                              size="sm"
+                              onClick={() => runModificationAction(selectedBooking, "approve")}
+                              disabled={Boolean(modificationActionLoading)}
+                            >
+                              {modificationActionLoading?.startsWith("approve:") ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                              Aprobă
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => runModificationAction(selectedBooking, "reject", { reason: "Respins din admin" })}
+                              disabled={Boolean(modificationActionLoading)}
+                            >
+                              Respinge
+                            </Button>
+                          </>
+                        )}
+                        {selectedBooking.activeModificationRequest.status === "failed" && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => runModificationAction(selectedBooking, "retry")}
+                            disabled={Boolean(modificationActionLoading)}
+                          >
+                            {modificationActionLoading?.startsWith("retry:") ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                            Reîncearcă aplicarea
+                          </Button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {selectedBooking.modificationHistory && selectedBooking.modificationHistory.length > 0 && (
+                  <div className="mt-4 rounded-md border border-slate-200 bg-slate-50 p-3 text-sm">
+                    <h3 className="mb-2 font-medium text-slate-900">Istoric modificări</h3>
+                    <div className="space-y-3">
+                      {[...selectedBooking.modificationHistory].reverse().map((historyItem, index) => {
+                        const appliedDate = parseFirestoreDate(historyItem.atIso)
+                        const isPayOnSiteModification =
+                          historyItem.paymentPolicy === "pay_on_site_amount_updated" || historyItem.payOnSiteLocalOnly === true
+                        const emailStatus = historyItem.modificationEmailStatus || "-"
+                        const emailStatusNode =
+                          emailStatus === "sent" ? (
+                            <span className="text-green-700">✅ Trimis</span>
+                          ) : emailStatus === "failed" ? (
+                            <span className="text-red-700">❌ Eșuat</span>
+                          ) : emailStatus === "pending" ? (
+                            <span className="text-amber-700">⏳ În curs</span>
+                          ) : (
+                            <span className="text-gray-500">-</span>
+                          )
+
+                        return (
+                          <div
+                            key={`${historyItem.requestId || "modification"}-${index}`}
+                            className="rounded-md border border-slate-200 bg-white p-3"
+                          >
+                            <div className="mb-2 flex flex-wrap items-center gap-2">
+                              <Badge className={isPayOnSiteModification ? "bg-orange-100 text-orange-700 border-orange-300" : "bg-blue-100 text-blue-700 border-blue-300"}>
+                                {isPayOnSiteModification ? "Plată la parcare" : "Online/Card"}
+                              </Badge>
+                              <span className="text-xs text-slate-500">
+                                {appliedDate ? formatDateFn(appliedDate, "dd MMM yyyy, HH:mm", { locale: ro }) : "Dată indisponibilă"}
+                              </span>
+                              {historyItem.status && (
+                                <Badge variant="outline" className="text-xs">
+                                  {historyItem.status}
+                                </Badge>
+                              )}
+                            </div>
+                            <div className="grid gap-2 text-slate-700 md:grid-cols-2">
+                              <p>
+                                <strong>Perioadă veche:</strong>{" "}
+                                {historyItem.oldValues?.startDate || "-"} {historyItem.oldValues?.startTime || "--:--"} →{" "}
+                                {historyItem.oldValues?.endDate || "-"} {historyItem.oldValues?.endTime || "--:--"}
+                              </p>
+                              <p>
+                                <strong>Perioadă nouă:</strong>{" "}
+                                {historyItem.newValues?.startDate || "-"} {historyItem.newValues?.startTime || "--:--"} →{" "}
+                                {historyItem.newValues?.endDate || "-"} {historyItem.newValues?.endTime || "--:--"}
+                              </p>
+                              <p>
+                                <strong>Mașină veche:</strong> {historyItem.oldValues?.licensePlate || "-"}
+                              </p>
+                              <p>
+                                <strong>Mașină nouă:</strong> {historyItem.newValues?.licensePlate || "-"}
+                              </p>
+                              <p>
+                                <strong>Valoare inițială:</strong> {Number(historyItem.oldAmount || 0).toFixed(2)} RON
+                              </p>
+                              <p>
+                                <strong>Valoare nouă:</strong> {Number(historyItem.newAmount || 0).toFixed(2)} RON
+                              </p>
+                              <p>
+                                <strong>Diferență:</strong> {Number(historyItem.difference || 0).toFixed(2)} RON
+                              </p>
+                              <p>
+                                <strong>{isPayOnSiteModification ? "Actualizare plată:" : "Plată/Credit:"}</strong>{" "}
+                                {isPayOnSiteModification
+                                  ? "Suma se achită la parcare"
+                                  : `Online ${Number(historyItem.amountToPay || 0).toFixed(2)} RON / Credit ${Number(historyItem.creditAmount || 0).toFixed(2)} RON`}
+                              </p>
+                              {!isPayOnSiteModification && (
+                                <>
+                                  <p>
+                                    <strong>Nr. Multipark vechi:</strong> {historyItem.oldApiBookingNumber || "-"}
+                                  </p>
+                                  <p>
+                                    <strong>Nr. Multipark nou:</strong> {historyItem.newApiBookingNumber || "-"}
+                                  </p>
+                                </>
+                              )}
+                              <p>
+                                <strong>Status email modificare:</strong> {emailStatusNode}
+                              </p>
+                              {historyItem.modificationEmailSentAtIso && (
+                                <p>
+                                  <strong>Email trimis la:</strong>{" "}
+                                  {(() => {
+                                    const emailDate = parseFirestoreDate(historyItem.modificationEmailSentAtIso)
+                                    return emailDate ? formatDateFn(emailDate, "dd MMM yyyy, HH:mm", { locale: ro }) : "-"
+                                  })()}
+                                </p>
+                              )}
+                              {historyItem.modificationEmailError && (
+                                <p className="md:col-span-2">
+                                  <strong>Eroare email:</strong>{" "}
+                                  <span className="text-red-700">{historyItem.modificationEmailError}</span>
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div className="min-w-0">
+                <h3 className="text-lg font-medium mb-2 text-gray-800">Informații Client</h3>
+                <div className="space-y-1 text-sm break-words">
+                  <p>
+                    <strong>Nume:</strong> {selectedBooking.clientName || "N/A"}
+                  </p>
+                  <p>
+                    <strong>Email:</strong> {selectedBooking.clientEmail || "N/A"}
+                  </p>
+                  <p>
+                    <strong>Telefon:</strong> {selectedBooking.clientPhone || "N/A"}
+                  </p>
+                  <p>
+                    <strong>Număr persoane:</strong> {selectedBooking.numberOfPersons || "N/A"}
+                  </p>
+                  {selectedBooking.address && (
+                    <p>
+                      <strong>Adresă:</strong> {selectedBooking.address}
+                    </p>
+                  )}
+                  {(selectedBooking.city || selectedBooking.county || selectedBooking.postalCode) && (
+                    <p>
+                      <strong>Localitate:</strong> {[selectedBooking.city, selectedBooking.county, selectedBooking.postalCode].filter(Boolean).join(", ")}
+                    </p>
+                  )}
+                </div>
+                
+                {selectedBooking.needInvoice && (
+                  <>
+                    <h3 className="text-lg font-medium mt-4 mb-2 text-gray-800">Date Facturare</h3>
+                    <div className="space-y-1 text-sm">
+                      {selectedBooking.company && (
+                        <p>
+                          <strong>Denumire firmă:</strong> {selectedBooking.company}
+                        </p>
+                      )}
+                      {selectedBooking.companyVAT && (
+                        <p>
+                          <strong>CUI/CIF:</strong> {selectedBooking.companyVAT}
+                        </p>
+                      )}
+                      {selectedBooking.companyReg && (
+                        <p>
+                          <strong>Nr. Reg. Comerțului:</strong> {selectedBooking.companyReg}
+                        </p>
+                      )}
+                      {selectedBooking.companyAddress && (
+                        <p>
+                          <strong>Adresa firmei:</strong> {selectedBooking.companyAddress}
+                        </p>
+                      )}
+                    </div>
+                  </>
+                )}
+                
+                <h3 className="text-lg font-medium mt-4 mb-2 text-gray-800">Informații Plată</h3>
+                <div className="space-y-1 text-sm">
+                  {selectedBooking.source === "manual" ? (
+                    <>
+                      <p>
+                        <strong>Tip Rezervare:</strong> <Badge className="bg-orange-100 text-orange-700 border-orange-400">Manual</Badge>
+                      </p>
+                      <p>
+                        <strong>Status Plată Manual:</strong> {getManualPaymentStatusBadge(selectedBooking)}
+                      </p>
+                      <p>
+                        <strong>Sumă:</strong> {selectedBooking.amount ? `${selectedBooking.amount.toFixed(2)} RON` : "0.00 RON (Fără cost)"}
+                      </p>
+                      <p className="text-gray-600 text-xs italic">
+                        * Pentru rezervările manuale, statusul plății se actualizează manual prin tab-ul principal.
+                      </p>
+                    </>
+                  ) : (selectedBooking.source === "lpr" || selectedBooking.status === "unmatched_lpr") ? (
+                    <>
+                      <p>
+                        <strong>Tip Rezervare:</strong>{" "}
+                        <Badge className="bg-purple-100 text-purple-700 border-purple-400">LPR</Badge>
+                      </p>
+                      <p>
+                        <strong>Status Plată:</strong> {getPaymentStatusBadge(selectedBooking.paymentStatus)}
+                      </p>
+                      <p>
+                        <strong>Sumă:</strong>{" "}
+                        {(() => {
+                          const amount = Number(selectedBooking.amount || 0) || 0
+                          if (amount > 0) return `${amount.toFixed(2)} RON`
+                          // For LPR fără rezervare, show value only after exit is known.
+                          if (isLprNoReservation(selectedBooking) && !isLprNoReservationCompleted(selectedBooking)) {
+                            return "0.00 RON (după ieșire)"
+                          }
+                          const computed = computeBookingRowValue(selectedBooking)
+                          return computed > 0 ? `${computed.toFixed(2)} RON` : "0.00 RON"
+                        })()}
+                      </p>
+                      <p className="text-gray-600 text-xs italic">
+                        * Rezervare provenită din LPR (nu se consideră „Plată la parcare” în rapoarte).
+                      </p>
+                    </>
+                  ) : isPayOnSiteBooking(selectedBooking) ? (
+                    <>
+                      {/* <p>
+                        <strong>Tip Rezervare:</strong> <Badge className="bg-orange-100 text-orange-700 border-orange-400">Plată la Parcare</Badge>
+                      </p> */}
+                      <p>
+                        <strong>Status Plată:</strong> <Badge className="bg-yellow-500 text-white">Nepaid (se plătește la parcare)</Badge>
+                      </p>
+                      <p>
+                        <strong>Sumă:</strong> {selectedBooking.amount ? `${selectedBooking.amount.toFixed(2)} RON` : "0.00 RON"}
+                      </p>
+                      <p className="text-gray-600 text-xs italic">
+                        * Plata se va efectua la sosirea în parcare.
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <p>
+                        <strong>Status Plată:</strong> {getPaymentStatusBadge(selectedBooking.paymentStatus)}
+                      </p>
+                      <p>
+                        <strong>Sumă:</strong> {selectedBooking.amount ? `${selectedBooking.amount.toFixed(2)} RON` : "N/A"}
+                      </p>
+                      <p>
+                        <strong>ID Tranzacție Stripe:</strong> {selectedBooking.paymentIntentId || "N/A"}
+                      </p>
+                    </>
+                  )}
+                  {selectedBooking.orderNotes && (
+                    <p>
+                      <strong>Observații:</strong> {selectedBooking.orderNotes}
+                    </p>
+                  )}
+                </div>
+
+                <h3 className="text-lg font-medium mt-4 mb-2 text-gray-800">Factură Oblio</h3>
+                <div className="space-y-1 text-sm">
+                  <p>
+                    <strong>Status:</strong>{" "}
+                    {selectedBooking.oblio?.status === "success" ? (
+                      <span className="text-green-600">✅ Generată</span>
+                    ) : selectedBooking.oblio?.status === "failed" ? (
+                      <span className="text-red-600">❌ Eșuată</span>
+                    ) : selectedBooking.oblio?.status === "pending" ? (
+                      <span className="text-amber-600">⏳ În curs</span>
+                    ) : (
+                      <span className="text-gray-500">-</span>
+                    )}
+                  </p>
+                  <p>
+                    <strong>Încercări:</strong> {selectedBooking.oblio?.attempts ?? 0}
+                  </p>
+                  {selectedBooking.oblio?.invoiceNumber && (
+                    <p>
+                      <strong>Număr factură:</strong> {selectedBooking.oblio.invoiceNumber}
+                    </p>
+                  )}
+                  {selectedBooking.oblio?.invoiceUrl && (
+                    <p>
+                      <strong>Link factură:</strong>{" "}
+                      <a
+                        href={selectedBooking.oblio.invoiceUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-blue-600 underline"
+                      >
+                        Deschide factura
+                      </a>
+                    </p>
+                  )}
+                  {selectedBooking.oblio?.lastError && (
+                    <p>
+                      <strong>Ultima eroare:</strong> <span className="text-red-600 text-xs">{selectedBooking.oblio.lastError}</span>
+                    </p>
+                  )}
+                  {selectedBooking.oblio?.lastAttemptAt && (
+                    <p>
+                      <strong>Ultima încercare:</strong>{" "}
+                      {(() => {
+                        const attemptDate = parseFirestoreDate(selectedBooking.oblio?.lastAttemptAt)
+                        return attemptDate ? formatDateFn(attemptDate, "dd MMM yyyy, HH:mm", { locale: ro }) : "N/A"
+                      })()}
+                    </p>
+                  )}
+                </div>
+                
+                <h3 className="text-lg font-medium mt-4 mb-2 text-gray-800">Status Email & QR</h3>
+                <div className="space-y-1 text-sm">
+                  <p>
+                    <strong>Email Client:</strong> {selectedBooking.clientEmail || "N/A"}
+                  </p>
+                  {/* Pentru pay-on-site nu afișăm informații despre QR (nu există în Multipark) */}
+                  {!isPayOnSiteBooking(selectedBooking) && (
+                    <>
+                      <p>
+                        <strong>QR Code Disponibil:</strong> {selectedBooking.apiBookingNumber ? "✅ Da" : "❌ Nu (lipsește nr. rezervare API)"}
+                      </p>
+                      {selectedBooking.apiBookingNumber && (
+                        <p>
+                          <strong>QR Code:</strong> MPK_RES={selectedBooking.apiBookingNumber.padStart(6, '0')}
+                        </p>
+                      )}
+                    </>
+                  )}
+                  {isPayOnSiteBooking(selectedBooking) && (
+                    <p>
+                      <strong>QR Code:</strong> <span className="text-gray-500">Nu este disponibil (plată la parcare)</span>
+                    </p>
+                  )}
+                  <p>
+                    <strong>Status Email:</strong> {selectedBooking.emailStatus ? 
+                      (selectedBooking.emailStatus === "sent" ? 
+                        <span className="text-green-600">✅ Trimis</span> : 
+                        <span className="text-red-600">❌ Eșuat</span>
+                      ) : 
+                      <span className="text-gray-500">-</span>
+                    }
+                  </p>
+                  {selectedBooking.emailSentAt && (
+                    <p>
+                      <strong>Email trimis la:</strong> {formatDateFn(selectedBooking.emailSentAt.toDate(), "dd MMM yyyy, HH:mm", { locale: ro })}
+                    </p>
+                  )}
+                  {selectedBooking.manualEmailCount && selectedBooking.manualEmailCount > 0 && (
+                    <p>
+                      <strong>Email-uri manuale trimise:</strong> {selectedBooking.manualEmailCount}
+                    </p>
+                  )}
+                  {selectedBooking.lastEmailError && (
+                    <p>
+                      <strong>Ultima eroare email:</strong> <span className="text-red-600 text-xs">{selectedBooking.lastEmailError}</span>
+                    </p>
+                  )}
+                </div>
+                
+                <h3 className="text-lg font-medium mt-4 mb-2 text-gray-800">Termeni și Condiții</h3>
+                <div className="space-y-1 text-sm">
+                  <p>
+                    <strong>Acceptat Termenii:</strong> {selectedBooking.termsAccepted ? 
+                      <span className="text-green-600">✅ Da</span> : 
+                      <span className="text-red-600">❌ Nu</span>
+                    }
+                  </p>
+                  {selectedBooking.termsAcceptedAt && (
+                    <p>
+                      <strong>Data acceptării:</strong> {formatDateFn(selectedBooking.termsAcceptedAt.toDate(), "dd MMM yyyy, HH:mm", { locale: ro })}
+                    </p>
+                  )}
+                  {!selectedBooking.termsAccepted && (
+                    <p className="text-amber-600 text-xs italic">
+                      ⚠️ Clientul nu a acceptat termenii și condițiile
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+            </div>
+            <div className="border-t px-6 py-4">
+              <div className="flex flex-col-reverse gap-2 sm:flex-row sm:flex-wrap sm:justify-end">
+            {/* Buton pentru trimiterea email-ului din dialog */}
+            {selectedBooking && selectedBooking.clientEmail && (selectedBooking.apiBookingNumber || isPayOnSiteBooking(selectedBooking)) && (
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setIsViewDialogOpen(false)
+                  handleSendEmail(selectedBooking)
+                }}
+                disabled={isSendingEmail}
+                className="w-full border-blue-600 text-blue-600 hover:bg-blue-50 hover:text-blue-700 sm:w-auto"
+              >
+                {isSendingEmail && sendingEmailBookingId === selectedBooking.id ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <Mail className="mr-2 h-4 w-4" />
+                )}
+                {isPayOnSiteBooking(selectedBooking) ? "Simulează email (fără QR)" : "Simulează email cu QR"}
+              </Button>
+            )}
+
+            {isAdmin && selectedBooking && canRetryOblioInvoice(selectedBooking) && (
+              <Button
+                variant="outline"
+                onClick={() => handleRetryOblioInvoice(selectedBooking)}
+                disabled={retryingOblioBookingId === selectedBooking.id}
+                className="w-full border-amber-500 text-amber-700 hover:bg-amber-50 hover:text-amber-800 sm:w-auto"
+              >
+                {retryingOblioBookingId === selectedBooking.id ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="mr-2 h-4 w-4" />
+                )}
+                Regenerează factură Oblio
+              </Button>
+            )}
+            
+            {isAdmin &&
+              selectedBooking &&
+              !String(selectedBooking.status || "").toLowerCase().includes("cancelled") &&
+              String(selectedBooking.status || "").toLowerCase() !== "expired" && (
+                <Button
+                  variant="destructive"
+                  onClick={() => {
+                    setBookingToCancel(selectedBooking)
+                    setCancelReasonInput("")
+                    setIsCancelDialogOpen(true)
+                  }}
+                  disabled={isCancellingLocalBooking}
+                  className="w-full sm:w-auto"
+                >
+                  {isCancellingLocalBooking ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <XCircle className="mr-2 h-4 w-4" />
+                  )}
+                  Anulează
+                </Button>
+              )}
+
+            {selectedBooking &&
+              !String(selectedBooking.status || "").toLowerCase().includes("cancelled") &&
+              String(selectedBooking.status || "").toLowerCase() !== "expired" && (
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setBookingToEditPlate(selectedBooking)
+                    setNewPlateInput(selectedBooking.licensePlate || "")
+                    setIsEditPlateDialogOpen(true)
+                  }}
+                  disabled={savingPlate}
+                  className="w-full sm:w-auto"
+                >
+                  <Pencil className="mr-2 h-4 w-4" />
+                  Modifică nr.
+                </Button>
+              )}
+            <Button variant="outline" onClick={() => setIsViewDialogOpen(false)} className="w-full sm:w-auto">
+              Închide
+            </Button>
+              </div>
+            </div>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Dialog pentru completarea rezervărilor unmatched_lpr din LPR */}
+      <Dialog
+        open={isLprCompleteDialogOpen}
+        onOpenChange={(open) => {
+          setIsLprCompleteDialogOpen(open)
+          if (!open) {
+            setLprBookingToComplete(null)
+          }
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Completează rezervare din LPR</DialogTitle>
+          </DialogHeader>
+          {lprBookingToComplete && (
+            <form
+              className="space-y-4"
+              onSubmit={async (e) => {
+                e.preventDefault()
+                if (!lprExitDate || !lprExitTime) {
+                  toast({
+                    title: "Câmpuri lipsă",
+                    description: "Data și ora de ieșire sunt obligatorii.",
+                    variant: "destructive",
+                  })
+                  return
+                }
+                const exitDateStr = formatDateFn(lprExitDate, "yyyy-MM-dd")
+                const exitTimeStr = lprExitTime
+                const persons = parseInt(lprPersons || "1", 10) || 1
+                try {
+                  const startDate = lprBookingToComplete.startDate
+                  const startTime = lprBookingToComplete.startTime
+                  let durationMinutes = lprBookingToComplete.durationMinutes || 0
+                  if (startDate && startTime) {
+                    const startTs = new Date(`${startDate}T${startTime}:00`).getTime()
+                    const endTs = new Date(`${exitDateStr}T${exitTimeStr}:00`).getTime()
+                    if (!Number.isNaN(startTs) && endTs > startTs) {
+                      durationMinutes = Math.floor((endTs - startTs) / (1000 * 60))
+                    }
+                  }
+
+                  const bookingRef = doc(db, "bookings", lprBookingToComplete.id)
+                  await updateDoc(bookingRef, {
+                    endDate: exitDateStr,
+                    endTime: exitTimeStr,
+                    durationMinutes,
+                    clientName: lprClientName || lprBookingToComplete.clientName || "",
+                    clientPhone: lprClientPhone || lprBookingToComplete.clientPhone || "",
+                    clientEmail: lprClientEmail || lprBookingToComplete.clientEmail || "",
+                    numberOfPersons: persons,
+                    source: "lpr",
+                    status: "confirmed_pay_on_site",
+                    paymentStatus: "pending",
+                    lastUpdated: serverTimestamp(),
+                  })
+
+                  toast({
+                    title: "Rezervare completată",
+                    description: `Rezervarea pentru ${lprBookingToComplete.licensePlate} a fost completată cu succes.`,
+                  })
+                  setIsLprCompleteDialogOpen(false)
+                  setLprBookingToComplete(null)
+                  await fetchBookings()
+                } catch (error) {
+                  console.error("Error completing LPR booking:", error)
+                  toast({
+                    title: "Eroare",
+                    description: "Nu s-a putut completa rezervarea din LPR.",
+                    variant: "destructive",
+                  })
+                }
+              }}
+            >
+              <div className="space-y-2 text-sm">
+                <p>
+                  <strong>Nr. înmatriculare:</strong> {lprBookingToComplete.licensePlate}
+                </p>
+                <p>
+                  <strong>Intrare (din LPR):</strong>{" "}
+                  {lprBookingToComplete.startDate && lprBookingToComplete.startTime
+                    ? `${formatDateFn(
+                        parseISO(lprBookingToComplete.startDate),
+                        "dd.MM.yyyy",
+                        { locale: ro },
+                      )} ${lprBookingToComplete.startTime}`
+                    : "N/A"}
+                </p>
+              </div>
+              <div className="grid grid-cols-1 gap-4 mt-4">
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Data ieșire *</label>
+                  <Input
+                    type="date"
+                    value={lprExitDate ? formatDateFn(lprExitDate, "yyyy-MM-dd") : ""}
+                    onChange={(e) =>
+                      setLprExitDate(e.target.value ? new Date(e.target.value) : undefined)
+                    }
+                    required
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Ora ieșire *</label>
+                  <Popover>
+                    <PopoverTrigger asChild>
+                      <Button
+                        variant="outline"
+                        className="w-full justify-start text-left font-normal h-10 border border-gray-200 bg-transparent hover:border-[#ff0066] focus:border-[#ff0066] focus:ring-2 focus:ring-[#ff0066]/20 hover:bg-transparent focus:bg-transparent text-gray-900 hover:text-gray-900"
+                        type="button"
+                      >
+                        <Clock className="mr-2 h-4 w-4 text-gray-500" />
+                        {lprExitTime}
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent className="w-auto p-4" align="start">
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium">Oră ieșire</label>
+                        <TimePickerDemo
+                          value={lprExitTime}
+                          onChange={(t) => setLprExitTime(t === "00:00" ? "00:05" : t)}
+                        />
+                      </div>
+                    </PopoverContent>
+                  </Popover>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Nume client</label>
+                  <Input
+                    value={lprClientName}
+                    onChange={(e) => setLprClientName(e.target.value)}
+                    placeholder="Ex: Ion Popescu"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Telefon *</label>
+                  <Input
+                    value={lprClientPhone}
+                    onChange={(e) => setLprClientPhone(e.target.value)}
+                    placeholder="Ex: 0722123456"
+                    required
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Adresa de mail</label>
+                  <Input
+                    type="email"
+                    value={lprClientEmail}
+                    onChange={(e) => setLprClientEmail(e.target.value)}
+                    placeholder="Ex: client@email.com"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Număr persoane *</label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={10}
+                    value={lprPersons}
+                    onChange={(e) => setLprPersons(e.target.value)}
+                    required
+                  />
+                </div>
+              </div>
+              <DialogFooter className="mt-4">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => {
+                    setIsLprCompleteDialogOpen(false)
+                    setLprBookingToComplete(null)
+                  }}
+                >
+                  Anulează
+                </Button>
+                <Button type="submit">Salvează</Button>
+              </DialogFooter>
+            </form>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Modal pentru adăugarea manuală de rezervări */}
+      <Dialog open={isManualDialogOpen} onOpenChange={(open) => {
+        if (!open) setApiLogData({ isVisible: false })
+        setIsManualDialogOpen(open)
+      }}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Adaugă Rezervare Manual</DialogTitle>
+          </DialogHeader>
+          <form onSubmit={handleCreateManualBooking} className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Număr Înmatriculare *</label>
+                <Input
+                  value={manualLicensePlate}
+                  onChange={(e) => {
+                    setManualLicensePlate(normalizeLicensePlate(e.target.value))
+                    // Golește eroarea când utilizatorul schimbă numărul
+                    setManualDuplicateError(null)
+                  }}
+                  placeholder="Ex: DB99SDF"
+                  className={manualDuplicateError ? "border-red-500" : ""}
+                  required
+                />
+                {manualDuplicateError && (
+                  <div className="text-red-500 text-sm font-semibold mt-1 flex items-center">
+                    <XCircle className="mr-1 h-4 w-4" />
+                    {manualDuplicateError}
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Număr Persoane</label>
+                <Input
+                  type="number"
+                  min="1"
+                  max="10"
+                  value={manualNumberOfPersons}
+                  onChange={(e) => setManualNumberOfPersons(e.target.value)}
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Mașina se află înăuntru?</label>
+                <label className="flex items-center gap-2 text-sm text-gray-700">
+                  <input
+                    type="checkbox"
+                    checked={manualIsInside}
+                    onChange={(e) => setManualIsInside(e.target.checked)}
+                    className="h-4 w-4"
+                  />
+                  <span>{manualIsInside ? "Da (ocupă un loc)" : "Nu (doar rezervare, nu ocupă loc)"}</span>
+                </label>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Data Intrare *</label>
+                <div className="relative">
+                  <Input
+                    type="date"
+                    value={manualStartDate ? formatDateFn(manualStartDate, "yyyy-MM-dd") : ''}
+                    onChange={(e) => setManualStartDate(e.target.value ? new Date(e.target.value) : undefined)}
+                    className="date-input-dd-mm-yyyy"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Ora Intrare *</label>
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button 
+                      variant="outline" 
+                      className="w-full justify-start text-left font-normal h-10 border border-gray-200 bg-transparent hover:border-[#ff0066] focus:border-[#ff0066] focus:ring-2 focus:ring-[#ff0066]/20 hover:bg-transparent focus:bg-transparent text-gray-900 hover:text-gray-900" 
+                      type="button"
+                    >
+                      <Clock className="mr-2 h-4 w-4 text-gray-500" />
+                      {manualStartTime}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-auto p-4" align="start">
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Oră intrare</label>
+                      <TimePickerDemo
+                        value={manualStartTime}
+                        onChange={(t) => setManualStartTime(t === "00:00" ? "00:05" : t)}
+                      />
+                    </div>
+                  </PopoverContent>
+                </Popover>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Data Ieșire *</label>
+                <div className="relative">
+                  <Input
+                    type="date"
+                    value={manualEndDate ? formatDateFn(manualEndDate, "yyyy-MM-dd") : ''}
+                    onChange={(e) => setManualEndDate(e.target.value ? new Date(e.target.value) : undefined)}
+                    className="date-input-dd-mm-yyyy"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Ora Ieșire *</label>
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button 
+                      variant="outline" 
+                      className="w-full justify-start text-left font-normal h-10 border border-gray-200 bg-transparent hover:border-[#ff0066] focus:border-[#ff0066] focus:ring-2 focus:ring-[#ff0066]/20 hover:bg-transparent focus:bg-transparent text-gray-900 hover:text-gray-900" 
+                      type="button"
+                    >
+                      <Clock className="mr-2 h-4 w-4 text-gray-500" />
+                      {manualEndTime}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-auto p-4" align="start">
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Oră ieșire</label>
+                      <TimePickerDemo
+                        value={manualEndTime}
+                        onChange={(t) => setManualEndTime(t === "00:00" ? "00:05" : t)}
+                      />
+                    </div>
+                  </PopoverContent>
+                </Popover>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Nume Client</label>
+                <Input
+                  value={manualClientName}
+                  onChange={(e) => setManualClientName(e.target.value)}
+                  placeholder="Ex: Ion Popescu"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Telefon Client</label>
+                <Input
+                  value={manualClientPhone}
+                  onChange={(e) => setManualClientPhone(e.target.value)}
+                  placeholder="Ex: 0721123456"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Plată (manual)</label>
+                <select
+                  value={manualPaymentStatusInput}
+                  onChange={(e) =>
+                    setManualPaymentStatusInput(e.target.value === "paid" ? "paid" : "not_paid")
+                  }
+                  className="w-full h-10 px-3 border border-gray-200 rounded-md bg-white text-sm"
+                >
+                  <option value="not_paid">Neplătit</option>
+                  <option value="paid">Achitat</option>
+                </select>
+              </div>
+
+              <div className="space-y-2 md:col-span-2">
+                <label className="text-sm font-medium">Email Client</label>
+                <Input
+                  type="email"
+                  value={manualClientEmail}
+                  onChange={(e) => setManualClientEmail(e.target.value)}
+                  placeholder="Ex: client@email.com"
+                />
+              </div>
+            </div>
+
+            {/* Secțiunea pentru logul vizual al API-ului multipark */}
+            {apiLogData.isVisible && (
+              <div className="mt-6 border-t pt-4">
+                <div className="flex items-center gap-2 mb-3">
+                  <div className="w-3 h-3 bg-blue-500 rounded-full animate-pulse"></div>
+                  <h3 className="text-lg font-semibold text-gray-800">
+                    Log API Multipark
+                  </h3>
+                </div>
+                
+                <div className="space-y-4 max-h-80 overflow-y-auto">
+                  {/* Request Section */}
+                  {apiLogData.request && (
+                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                      <div className="flex items-center gap-2 mb-2">
+                        <div className="w-2 h-2 bg-blue-500 rounded-full"></div>
+                        <h4 className="font-medium text-blue-800">
+                          📤 Request către {apiLogData.request.url}
+                        </h4>
+                      </div>
+                      <div className="text-xs text-blue-600 mb-2">
+                        ⏰ {apiLogData.request.timestamp}
+                      </div>
+                      <div className="bg-white border border-blue-200 rounded p-2">
+                        <pre className="text-xs text-gray-700 whitespace-pre-wrap">
+                          {apiLogData.request.payload}
+                        </pre>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Response Section */}
+                  {apiLogData.response && (
+                    <div className={`border rounded-lg p-3 ${
+                      apiLogData.response.success 
+                        ? 'bg-green-50 border-green-200' 
+                        : 'bg-red-50 border-red-200'
+                    }`}>
+                      <div className="flex items-center gap-2 mb-2">
+                        <div className={`w-2 h-2 rounded-full ${
+                          apiLogData.response.success ? 'bg-green-500' : 'bg-red-500'
+                        }`}></div>
+                        <h4 className={`font-medium ${
+                          apiLogData.response.success ? 'text-green-800' : 'text-red-800'
+                        }`}>
+                          📥 Response - Status {apiLogData.response.status} {
+                            apiLogData.response.success ? '✅' : '❌'
+                          }
+                        </h4>
+                      </div>
+                      <div className={`text-xs mb-2 ${
+                        apiLogData.response.success ? 'text-green-600' : 'text-red-600'
+                      }`}>
+                        ⏰ {apiLogData.response.timestamp}
+                      </div>
+                      
+                      {/* Success/Error Summary */}
+                      <div className={`mb-2 p-2 rounded text-sm ${
+                        apiLogData.response.success 
+                          ? 'bg-green-100 text-green-800' 
+                          : 'bg-red-100 text-red-800'
+                      }`}>
+                        <strong>
+                          {apiLogData.response.success ? '🎉 Success: ' : '⚠️ Error: '}
+                        </strong>
+                        {apiLogData.response.message}
+                        {apiLogData.response.errorCode && (
+                          <span className="ml-2 text-xs">
+                            (Code: {apiLogData.response.errorCode})
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Raw Response */}
+                      <div className="bg-white border rounded p-2">
+                        <div className="text-xs font-medium text-gray-600 mb-1">
+                          Raw Response:
+                        </div>
+                        <pre className="text-xs text-gray-700 whitespace-pre-wrap max-h-40 overflow-y-auto">
+                          {apiLogData.response.body}
+                        </pre>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Loading state când avem doar request */}
+                  {apiLogData.request && !apiLogData.response && (
+                    <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
+                      <div className="flex items-center gap-2">
+                        <div className="w-4 h-4 border-2 border-yellow-500 border-t-transparent rounded-full animate-spin"></div>
+                        <span className="text-yellow-800 font-medium">
+                          Se așteaptă răspunsul de la serverul multipark...
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <DialogFooter>
+              <Button type="button" variant="outline" className="hover:text-white" onClick={() => {
+                setApiLogData({ isVisible: false })
+                setIsManualDialogOpen(false)
+              }}>
+                Anulează
+              </Button>
+              <Button type="submit" disabled={isCreatingManual}>
+                {isCreatingManual ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Se procesează...
+                  </>
+                ) : (
+                  'Creează Rezervarea'
+                )}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Dialog pentru trimiterea email-ului după rezervare manuală */}
+      <Dialog open={isEmailDialogOpen} onOpenChange={(open) => {
+        if (!open) {
+          setIsEmailDialogOpen(false)
+          setNewBookingForEmail(null)
+        }
+      }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Mail className="h-5 w-5 text-blue-600" />
+              Simulează emailul de confirmare?
+            </DialogTitle>
+          </DialogHeader>
+          
+          {newBookingForEmail && (
+            <div className="space-y-4">
+              <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                  <span className="font-medium text-green-800">
+                    Rezervarea a fost creată cu succes!
+                  </span>
+                </div>
+                <div className="text-sm text-green-700 space-y-1">
+                  <p><strong>Număr rezervare:</strong> {newBookingForEmail.apiBookingNumber}</p>
+                  <p><strong>Auto:</strong> {newBookingForEmail.licensePlate}</p>
+                  <p><strong>Client:</strong> {newBookingForEmail.clientName}</p>
+                </div>
+              </div>
+
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <Mail className="h-4 w-4 text-blue-600" />
+                  <span className="font-medium text-blue-800">
+                    Email disponibil
+                  </span>
+                </div>
+                <p className="text-sm text-blue-700">
+                  <strong>Destinatar:</strong> {newBookingForEmail.clientEmail}
+                </p>
+                <p className="text-xs text-blue-600 mt-1">
+                  Mediu de test: niciun email nu va fi trimis.
+                </p>
+              </div>
+
+              <div className="text-sm text-gray-600">
+                Simularea salvează rezultatul în Firebase demo.
+              </div>
+            </div>
+          )}
+
+          <DialogFooter className="gap-2">
+            <Button 
+              type="button" 
+              variant="outline" 
+              onClick={() => {
+                setIsEmailDialogOpen(false)
+                setNewBookingForEmail(null)
+              }}
+              disabled={isSendingEmail}
+            >
+              Nu trimite
+            </Button>
+            <Button 
+              type="button" 
+              onClick={handleSendEmailFromNewBooking}
+              disabled={isSendingEmail}
+              className="bg-waze-blue hover:bg-waze-blue/80"
+            >
+              {isSendingEmail ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Se simulează...
+                </>
+              ) : (
+                <>
+                  <Mail className="mr-2 h-4 w-4" />
+                  Simulează email
+                </>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Dialog pentru confirmarea succesului recovery-ului */}
+      <Dialog open={isRecoverySuccessDialogOpen} onOpenChange={(open) => {
+        if (!open) {
+          setIsRecoverySuccessDialogOpen(false)
+          setRecoverySuccessData(null)
+        }
+      }}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <div className="w-8 h-8 bg-green-100 rounded-full flex items-center justify-center">
+                <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse"></div>
+              </div>
+              Recovery Multipark Reușit!
+            </DialogTitle>
+          </DialogHeader>
+          
+          {recoverySuccessData && (
+            <div className="space-y-4">
+              {/* Success Summary */}
+              <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+                <div className="flex items-center gap-2 mb-3">
+                  <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                  <span className="font-semibold text-green-800">
+                    ✅ Rezervarea a fost trimisă cu succes la API Multipark
+                  </span>
+                </div>
+                <div className="text-sm text-green-700 space-y-1">
+                  <p><strong>Număr rezervare nou:</strong> {recoverySuccessData.bookingNumber}</p>
+                  <p><strong>Auto:</strong> {recoverySuccessData.licensePlate}</p>
+                  <p><strong>Client:</strong> {recoverySuccessData.clientName}</p>
+                </div>
+              </div>
+
+             
+
+              {/* What happens next */}
+              <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <div className="w-4 h-4 bg-gray-500 rounded-full flex items-center justify-center">
+                    <span className="text-white text-xs">i</span>
+                  </div>
+                  <span className="font-medium text-gray-800">
+                    Ce urmează
+                  </span>
+                </div>
+                <div className="text-sm text-gray-700 space-y-1">
+                  <p>✅ Rezervarea este acum activă în sistemul multipark</p>
+                  <p>✅ QR code-ul este disponibil pentru trimiterea email-ului</p>
+                  <p>✅ Statusul rezervării a fost actualizat la "Confirmat"</p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button 
+              type="button" 
+              onClick={() => {
+                setIsRecoverySuccessDialogOpen(false)
+                setRecoverySuccessData(null)
+              }}
+              className="w-full bg-green-600 hover:bg-green-700"
+            >
+              Perfect! Închide
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}
+
+export default function BookingsPage() {
+  return (
+    // Suspense este util dacă ai operațiuni asincrone la nivel superior sau parametri de căutare
+    // Pentru moment, logica de încărcare este în BookingsPageContent
+    <Suspense
+      fallback={
+        <div className="flex justify-center items-center h-64">
+          <Loader2 className="h-8 w-8 animate-spin" /> <p className="ml-2">Se încarcă pagina...</p>
+        </div>
+      }
+    >
+      <BookingsPageContent />
+    </Suspense>
+  )
+}
