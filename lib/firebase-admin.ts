@@ -1,7 +1,9 @@
 import { assertDemoProject } from "./demo-config"
 import { applicationDefault, cert, getApps, initializeApp, type App } from "firebase-admin/app"
 import { getAuth } from "firebase-admin/auth"
+import type { Auth } from "firebase-admin/auth"
 import { getFirestore } from "firebase-admin/firestore"
+import type { Firestore } from "firebase-admin/firestore"
 
 type ServiceAccountShape = {
   projectId?: string
@@ -40,18 +42,23 @@ function readServiceAccountFromEnv(): ServiceAccountShape | null {
   }
 }
 
+let firebaseAdminApp: App | undefined
+
 function getFirebaseAdminApp(): App {
+  if (firebaseAdminApp) return firebaseAdminApp
+
   assertDemoProject(process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID)
   const existing = getApps()[0]
   if (existing) {
     assertDemoProject(existing.options.projectId)
-    return existing
+    firebaseAdminApp = existing
+    return firebaseAdminApp
   }
 
   const serviceAccount = readServiceAccountFromEnv()
   if (serviceAccount?.projectId && serviceAccount.clientEmail && serviceAccount.privateKey) {
     assertDemoProject(serviceAccount.projectId)
-    return initializeApp({
+    firebaseAdminApp = initializeApp({
       projectId: serviceAccount.projectId,
       credential: cert({
         projectId: serviceAccount.projectId,
@@ -59,15 +66,31 @@ function getFirebaseAdminApp(): App {
         privateKey: serviceAccount.privateKey,
       }),
     })
+    return firebaseAdminApp
   }
 
   if (process.env.DEMO_LOCAL_ADC === "true" && !process.env.VERCEL) {
-    return initializeApp({ projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID, credential: applicationDefault() })
+    firebaseAdminApp = initializeApp({ projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID, credential: applicationDefault() })
+    return firebaseAdminApp
   }
   throw new Error("FIREBASE_SERVICE_ACCOUNT_KEY este obligatorie pentru proiectul demo; nu folosim credențiale implicite.")
 }
 
-const firebaseAdminApp = getFirebaseAdminApp()
+function lazyFirebaseService<T extends object>(createService: () => T): T {
+  const target = Object.create(null) as T
+  return new Proxy(target, {
+    get(_target, property) {
+      const service = createService()
+      const value = Reflect.get(service, property, service)
+      return typeof value === "function" ? value.bind(service) : value
+    },
+    set(_target, property, value) {
+      return Reflect.set(createService(), property, value)
+    },
+  })
+}
 
-export const adminAuth = getAuth(firebaseAdminApp)
-export const adminDb = getFirestore(firebaseAdminApp)
+// Importing API route modules during `next build` must not initialize Admin SDK
+// or inspect credentials. Validate the project and initialize only on a real request.
+export const adminAuth = lazyFirebaseService<Auth>(() => getAuth(getFirebaseAdminApp()))
+export const adminDb = lazyFirebaseService<Firestore>(() => getFirestore(getFirebaseAdminApp()))

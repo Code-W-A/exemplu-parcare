@@ -1,6 +1,8 @@
 # Panou admin demo
 
-Acest director `next-js` este copia de test. Folosește exclusiv Firebase `parcari-admin-demo-20261004` și nu poate fi conectat accidental la alt proiect. Modificările în panou sunt salvate în Firestore. Datele sunt fictive; parcarea, barierele, emailurile, plățile și facturile sunt simulate. Endpointurile externe și paginile publice de rezervare nu sunt disponibile în această livrare.
+Acest director `next-js` este copia de test. Folosește exclusiv Firebase `parcari-admin-demo-20261004` și nu poate fi conectat accidental la alt proiect. Modificările în panou sunt salvate în Firestore. Datele sunt fictive; parcarea, barierele, emailurile, plățile și facturile sunt simulate. Handler-ele API externe, mobile și LPR au fost scoase; middleware-ul demo le respinge cu 403. Paginile publice de rezervare nu sunt disponibile în această livrare.
+
+Rutele `/api/admin/*` sunt endpointuri Next.js interne folosite de panou pentru sesiune, utilizatori, ocupare și administrarea rezervărilor în Firebase. Le păstrăm; ele nu apelează servicii externe. Firebase Admin se inițializează la prima cerere, nu la importul rutelor în timpul build-ului. Build-ul poate trece fără credențiale server, dar operațiile admin server-side cer o credențială privată validă pentru același proiect demo. O cheie din alt proiect este respinsă la execuție.
 
 ## Rulare locală
 
