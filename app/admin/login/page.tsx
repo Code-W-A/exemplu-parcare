@@ -3,7 +3,6 @@
 import type React from "react"
 import { useState, useEffect } from "react" // Adaugă useEffect pentru log
 import { useRouter } from "next/navigation"
-import Image from "next/image"
 import { getIdTokenResult, signInWithEmailAndPassword } from "firebase/auth"
 import { auth } from "@/lib/firebase"
 import { Button } from "@/components/ui/button"
@@ -79,22 +78,7 @@ export default function LoginPage() {
       <div className="w-full max-w-md p-8 space-y-8 bg-white rounded-xl shadow-lg">
         <div className="text-center">
           <div className="flex justify-center mb-4">
-            {/* Mobile logo */}
-            <Image
-              src="/otp_parking.png"
-              alt="OTP Parking Logo"
-              width={150}
-              height={60}
-              className="h-12 w-auto md:hidden"
-            />
-            {/* Desktop logo */}
-            <Image
-              src="/otp_parking.png"
-              alt="OTP Parking Logo"
-              width={150}
-              height={60}
-              className="hidden md:block h-12 w-auto"
-            />
+            <span className="text-2xl font-semibold tracking-tight text-gray-900">white label</span>
           </div>
           <p className="mt-2 text-gray-600">Panou de administrare</p>
         </div>

@@ -1,7 +1,6 @@
 "use client"
 import { useEffect, type ReactNode, useState } from "react"
 import Link from "next/link"
-import Image from "next/image"
 import { useRouter, usePathname } from "next/navigation"
 import { AuthProvider, useAuth } from "@/context/auth-context"
 import { Button } from "@/components/ui/button"
@@ -100,22 +99,7 @@ function AdminLayoutContent({ children }: { children: ReactNode }) {
     const SidebarContent = () => (
       <div className="flex flex-col h-full">
         <div className="flex items-center justify-center p-6 border-b">
-          {/* Mobile logo for sidebar */}
-          <Image
-            src="/otp_parking.png"
-            alt="OTP Parking Logo"
-            width={120}
-            height={48}
-            className="h-8 w-auto md:hidden"
-          />
-          {/* Desktop logo for sidebar */}
-          <Image
-            src="/otp_parking.png"
-            alt="OTP Parking Logo"
-            width={120}
-            height={48}
-            className="hidden md:block h-8 w-auto"
-          />
+          <span className="text-xl font-semibold tracking-tight text-gray-900">white label</span>
         </div>
         <nav className="flex-1 px-4 py-6 space-y-2">
           {adminNavItems.map((item) => {
@@ -189,13 +173,7 @@ function AdminLayoutContent({ children }: { children: ReactNode }) {
             >
               <Menu className="h-5 w-5" />
             </Button>
-            <Image
-              src="/otp_parking.png"
-              alt="OTP Parking Logo"
-              width={100}
-              height={40}
-              className="h-6 w-auto"
-            />
+            <span className="text-lg font-semibold tracking-tight text-gray-900">white label</span>
             <div className="w-8" /> {/* Spacer */}
           </div>
 
